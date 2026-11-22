@@ -1,0 +1,1969 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Draw a Digit</title>
+  <style>
+    html, body { margin: 0; height: 100%; overflow: hidden; background: #cfe8fa; }
+    canvas { display: block; }
+    #draw { position: fixed; inset: 0; touch-action: none; cursor: crosshair; }
+    #status {
+      position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+      padding: 8px 20px; border-radius: 999px; background: rgba(11, 15, 26, 0.7);
+      color: #fff; font: 600 22px system-ui, sans-serif; user-select: none; pointer-events: none;
+      text-align: center; white-space: nowrap;
+    }
+    #picker {
+      position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%);
+      display: flex; gap: 8px; z-index: 2;
+    }
+    #picker button, #mute {
+      width: 48px; height: 48px; border-radius: 50%; border: 2px solid #4fd1ff; cursor: pointer;
+      background: #141b2e; color: #fff; font: 700 22px system-ui, sans-serif;
+    }
+    #picker button:hover, #mute:hover { background: #1e2a48; }
+    #picker button.active { background: #ffd23f; border-color: #ffd23f; color: #0b0f1a; }
+    #mute { position: fixed; top: 16px; right: 16px; z-index: 2; font-size: 20px; }
+  </style>
+</head>
+<body>
+  <canvas id="draw"></canvas>
+  <div id="status">Pick a number below 👇</div>
+  <button id="mute" title="Sound on/off">🔊</button>
+  <div id="picker">
+    <button data-digit="1">1</button><button data-digit="2">2</button><button data-digit="3">3</button><button data-digit="4">4</button>
+    <button data-digit="5">5</button><button data-digit="6">6</button><button data-digit="7">7</button><button data-digit="8">8</button><button data-digit="9">9</button>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from 'three';
+    import { MeshSurfaceSampler } from 'three/addons/math/MeshSurfaceSampler.js';
+    import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+    import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
+
+    const COUNT = 12000;      // particles used for the digit -> object morph
+    const GROUND_Y = -1.95;
+    const C = (hex) => new THREE.Color(hex);
+    const rand = Math.random;
+    const { clamp, lerp } = THREE.MathUtils;
+
+    // ---------- renderer + outdoor scene ----------
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    renderer.toneMappingExposure = 0.95;
+    document.body.appendChild(renderer.domElement);
+
+    const scene = new THREE.Scene();
+    // image-based lighting so metal and glossy plastic have something to reflect
+    scene.environment = new THREE.PMREMGenerator(renderer).fromScene(new RoomEnvironment(), 0.04).texture;
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 200);
+    const CAM_R = Math.hypot(0.5, 8), CAM_A = Math.atan2(0.5, 8), CAM_Y = 1.2;
+    let camLookY = 0;
+    function homeCamera() {
+      camLookY = 0;
+      camera.position.set(Math.sin(CAM_A) * CAM_R, CAM_Y, Math.cos(CAM_A) * CAM_R);
+      camera.lookAt(0, 0, 0);
+      camera.updateMatrixWorld();
+    }
+    homeCamera();
+
+    // sky + ground colours blend between a sunny day and a snowy one
+    const ENV = {
+      day: { top: C(0x2f7fd8), bottom: C(0xcfe8fa), ground: C(0x6fb354) },
+      snow: { top: C(0x7f93aa), bottom: C(0xdfe7ef), ground: C(0xf2f6fb) },
+    };
+    let envTarget = ENV.day;
+
+    const skyMat = new THREE.ShaderMaterial({
+      side: THREE.BackSide, depthWrite: false, fog: false, toneMapped: false,
+      uniforms: { uTop: { value: ENV.day.top.clone() }, uBottom: { value: ENV.day.bottom.clone() } },
+      vertexShader: /* glsl */ `
+        varying vec3 vDir;
+        void main() {
+          vDir = normalize(position);
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        uniform vec3 uTop;
+        uniform vec3 uBottom;
+        varying vec3 vDir;
+        void main() {
+          float h = clamp(vDir.y * 1.6, 0.0, 1.0);
+          gl_FragColor = vec4(mix(uBottom, uTop, pow(h, 0.55)), 1.0);
+          #include <colorspace_fragment>
+        }
+      `,
+    });
+    scene.add(new THREE.Mesh(new THREE.SphereGeometry(150, 32, 16), skyMat));
+    scene.fog = new THREE.Fog(ENV.day.bottom.clone(), 30, 110);
+
+    // small canvas textures
+    function canvasTexture(size, draw) {
+      const c = document.createElement('canvas');
+      c.width = c.height = size;
+      draw(c.getContext('2d'), size);
+      const tex = new THREE.CanvasTexture(c);
+      tex.colorSpace = THREE.SRGBColorSpace;
+      return tex;
+    }
+    const grainTex = canvasTexture(256, (g, s) => {
+      g.fillStyle = '#e4e4e4';
+      g.fillRect(0, 0, s, s);
+      for (let i = 0; i < 9000; i++) {
+        const v = 150 + Math.floor(rand() * 105);
+        g.fillStyle = `rgba(${v},${v},${v},0.55)`;
+        g.fillRect(rand() * s, rand() * s, 1 + rand() * 1.5, 2 + rand() * 4);
+      }
+    });
+    grainTex.wrapS = grainTex.wrapT = THREE.RepeatWrapping;
+    grainTex.repeat.set(70, 70);
+    const dotTex = canvasTexture(64, (g, s) => {
+      const grad = g.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+      grad.addColorStop(0, 'rgba(255,255,255,1)');
+      grad.addColorStop(0.6, 'rgba(255,255,255,0.9)');
+      grad.addColorStop(1, 'rgba(255,255,255,0)');
+      g.fillStyle = grad;
+      g.fillRect(0, 0, s, s);
+    });
+
+    const groundMat = new THREE.MeshStandardMaterial({ color: ENV.day.ground.clone(), map: grainTex, roughness: 1 });
+    const ground = new THREE.Mesh(new THREE.CircleGeometry(150, 64), groundMat);
+    ground.rotation.x = -Math.PI / 2;
+    ground.position.y = GROUND_Y;
+    ground.receiveShadow = true;
+    scene.add(ground);
+
+    scene.add(new THREE.HemisphereLight(0xffffff, 0x8fae7a, 0.75));
+    const sun = new THREE.DirectionalLight(0xfff3dd, 2.6);
+    sun.position.set(5, 9, 6);
+    sun.castShadow = true;
+    sun.shadow.mapSize.set(2048, 2048);
+    Object.assign(sun.shadow.camera, { left: -10, right: 10, top: 10, bottom: -10, near: 0.5, far: 40 });
+    sun.shadow.camera.updateProjectionMatrix();
+    sun.shadow.bias = -0.0005;
+    sun.shadow.normalBias = 0.02;
+    scene.add(sun);
+
+    // drifting clouds
+    const cloudMat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1, fog: false });
+    const clouds = Array.from({ length: 7 }, (_, i) => {
+      const cloud = new THREE.Group();
+      for (let j = 0; j < 5; j++) {
+        const puff = new THREE.Mesh(new THREE.SphereGeometry(1.6 + rand() * 1.2, 16, 12), cloudMat);
+        puff.position.set(j * 1.9 - 3.8 + rand(), rand() * 0.7, rand() * 1.5);
+        puff.scale.y = 0.6;
+        cloud.add(puff);
+      }
+      cloud.position.set(-42 + i * 14 + rand() * 5, 7 + rand() * 6, -42 - rand() * 14);
+      scene.add(cloud);
+      return cloud;
+    });
+
+    // ---------- sound (all synthesised with Web Audio, no files) ----------
+    const audio = { ctx: null, master: null, noiseBuf: null, muted: false, loops: [] };
+    function actx() {
+      if (!audio.ctx) {
+        const ctx = (audio.ctx = new (window.AudioContext || window.webkitAudioContext)());
+        audio.master = ctx.createGain();
+        audio.master.gain.value = audio.muted ? 0 : 0.9;
+        audio.master.connect(ctx.createDynamicsCompressor()).connect(ctx.destination);
+        audio.noiseBuf = ctx.createBuffer(1, ctx.sampleRate * 2, ctx.sampleRate);
+        const data = audio.noiseBuf.getChannelData(0);
+        for (let i = 0; i < data.length; i++) data[i] = rand() * 2 - 1;
+      }
+      if (audio.ctx.state === 'suspended') audio.ctx.resume();
+      return audio.ctx;
+    }
+
+    function tone({ type = 'sine', f = 440, f2 = f, dur = 0.2, gain = 0.1, at = 0, attack = 0.008 }) {
+      const ctx = actx(), t0 = ctx.currentTime + at;
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.type = type;
+      o.frequency.setValueAtTime(f, t0);
+      if (f2 !== f) o.frequency.exponentialRampToValueAtTime(f2, t0 + dur);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(gain, t0 + attack);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      o.connect(g).connect(audio.master);
+      o.start(t0);
+      o.stop(t0 + dur + 0.05);
+    }
+
+    function noiseSource(ctx, when = 0) {
+      const src = ctx.createBufferSource();
+      src.buffer = audio.noiseBuf;
+      src.loop = true;
+      src.start(when, rand() * 1.5);
+      return src;
+    }
+
+    function noise({ filter = 'lowpass', f = 1000, f2 = f, q = 1, dur = 0.2, gain = 0.1, at = 0, attack = 0.005 }) {
+      const ctx = actx(), t0 = ctx.currentTime + at;
+      const src = noiseSource(ctx, t0), bq = ctx.createBiquadFilter(), g = ctx.createGain();
+      bq.type = filter;
+      bq.Q.value = q;
+      bq.frequency.setValueAtTime(f, t0);
+      if (f2 !== f) bq.frequency.exponentialRampToValueAtTime(f2, t0 + dur);
+      g.gain.setValueAtTime(0.0001, t0);
+      g.gain.linearRampToValueAtTime(gain, t0 + attack);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      src.connect(bq).connect(g).connect(audio.master);
+      src.stop(t0 + dur + 0.05);
+    }
+
+    // continuous sounds (rumble, wind, motor): returns a handle with set(volume) / stop()
+    function startLoop(build) {
+      const ctx = actx();
+      const out = ctx.createGain();
+      out.gain.value = 0;
+      out.connect(audio.master);
+      const handle = {
+        ...build(ctx, out),
+        set(v, seconds = 0.3) { out.gain.setTargetAtTime(v, ctx.currentTime, seconds / 3); },
+        stop(fade = 0.3) {
+          this.set(0, fade);
+          audio.loops = audio.loops.filter((h) => h !== this);
+          setTimeout(() => {
+            this.sources.forEach((s) => { try { s.stop(); } catch { /* already stopped */ } });
+            out.disconnect();
+          }, fade * 1000 + 300);
+        },
+      };
+      audio.loops.push(handle);
+      return handle;
+    }
+    function lfo(ctx, hz, depth, param) {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.value = hz;
+      g.gain.value = depth;
+      o.connect(g).connect(param);
+      o.start();
+      return o;
+    }
+    function filtered(ctx, src, type, f, q = 1) {
+      const bq = ctx.createBiquadFilter();
+      bq.type = type;
+      bq.frequency.value = f;
+      bq.Q.value = q;
+      src.connect(bq);
+      return bq;
+    }
+
+    const rawSfx = {
+      click: () => tone({ f: 660, dur: 0.07, gain: 0.08 }),
+      pop: (n) => tone({ type: 'triangle', f: 420 + n * 38, f2: (420 + n * 38) * 1.5, dur: 0.11, gain: 0.13 }),
+      chime: () => [523.25, 659.25, 783.99, 1046.5].forEach((f, i) => tone({ type: 'triangle', f, dur: 0.6, gain: 0.12, at: i * 0.09 })),
+      whoosh() {
+        noise({ filter: 'bandpass', f: 300, f2: 2600, q: 1.2, dur: 2.8, gain: 0.1, attack: 0.9 });
+        for (let i = 0; i < 10; i++) tone({ f: 1500 + rand() * 2500, dur: 0.14, gain: 0.03, at: 0.3 + i * 0.25 });
+      },
+      thud() {
+        tone({ f: 120, f2: 42, dur: 0.28, gain: 0.5 });
+        noise({ f: 350, dur: 0.12, gain: 0.22 });
+      },
+      quack(at = 0) {
+        // sawtooth through two formant filters, pitch falling: "kwaak"
+        const ctx = actx(), t0 = ctx.currentTime + at, dur = 0.17;
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.type = 'sawtooth';
+        o.frequency.setValueAtTime(700, t0);
+        o.frequency.exponentialRampToValueAtTime(420, t0 + dur);
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.linearRampToValueAtTime(0.5, t0 + 0.015);
+        g.gain.setValueAtTime(0.5, t0 + dur * 0.6);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        filtered(ctx, o, 'bandpass', 1050, 5).connect(g);
+        filtered(ctx, o, 'bandpass', 2300, 6).connect(g);
+        g.connect(audio.master);
+        o.start(t0);
+        o.stop(t0 + dur + 0.05);
+      },
+      beep: () => tone({ type: 'square', f: 880, dur: 0.18, gain: 0.05 }),
+      ignite: () => noise({ f: 2400, f2: 200, dur: 1.2, gain: 0.4, attack: 0.05 }),
+      whee() {
+        // slide-whistle swoop for a kid going down the slide
+        const ctx = actx(), t0 = ctx.currentTime, dur = 1.7;
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.frequency.setValueAtTime(700, t0);
+        o.frequency.exponentialRampToValueAtTime(1500, t0 + 0.3);
+        o.frequency.exponentialRampToValueAtTime(480, t0 + dur);
+        const vib = lfo(ctx, 9, 25, o.frequency);
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.linearRampToValueAtTime(0.045, t0 + 0.05);
+        g.gain.setValueAtTime(0.045, t0 + dur - 0.4);
+        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+        o.connect(g).connect(audio.master);
+        o.start(t0);
+        o.stop(t0 + dur + 0.05);
+        vib.stop(t0 + dur + 0.05);
+      },
+      flap: () => noise({ f: 420 + rand() * 250, dur: 0.1, gain: 0.16 }),
+      clank() {
+        [523, 811, 1293, 1740].forEach((f) => tone({ type: 'triangle', f, dur: 0.5, gain: 0.06 }));
+        noise({ filter: 'highpass', f: 3000, dur: 0.06, gain: 0.15 });
+      },
+      whistle(dur) {
+        // high tone warbled by the "pea" inside, plus breath noise
+        const ctx = actx(), t0 = ctx.currentTime;
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.frequency.value = 2600;
+        const warble = lfo(ctx, 28, 180, o.frequency);
+        g.gain.setValueAtTime(0.0001, t0);
+        g.gain.linearRampToValueAtTime(0.12, t0 + 0.05);
+        g.gain.setValueAtTime(0.12, t0 + dur - 0.08);
+        g.gain.linearRampToValueAtTime(0.0001, t0 + dur);
+        o.connect(g).connect(audio.master);
+        o.start(t0);
+        o.stop(t0 + dur + 0.05);
+        warble.stop(t0 + dur + 0.05);
+        noise({ filter: 'bandpass', f: 3200, q: 2, dur, gain: 0.03, attack: 0.05 });
+      },
+      step(pitch = 1) {
+        tone({ f: 95 * pitch, f2: 50 * pitch, dur: 0.1, gain: 0.28 });
+        noise({ f: 600, dur: 0.05, gain: 0.07 });
+      },
+      tap: () => tone({ type: 'triangle', f: 1200, f2: 900, dur: 0.05, gain: 0.2 }),
+      pick: () => tone({ f: 500, f2: 900, dur: 0.14, gain: 0.12 }),
+      yum: () => [784, 988, 1175, 1568].forEach((f, i) => tone({ type: 'triangle', f, dur: 0.25, gain: 0.1, at: i * 0.1 })),
+      hoho(at = 0) {
+        // three deep "ho"s: low sawtooth through vowel formants, pitch stepping down
+        const ctx = actx();
+        [150, 135, 118].forEach((f, i) => {
+          const t0 = ctx.currentTime + at + i * 0.32, dur = 0.24;
+          const o = ctx.createOscillator(), g = ctx.createGain();
+          o.type = 'sawtooth';
+          o.frequency.setValueAtTime(f * 1.15, t0);
+          o.frequency.exponentialRampToValueAtTime(f, t0 + dur);
+          g.gain.setValueAtTime(0.0001, t0);
+          g.gain.linearRampToValueAtTime(0.5, t0 + 0.03);
+          g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+          filtered(ctx, o, 'bandpass', 480, 4).connect(g);
+          filtered(ctx, o, 'bandpass', 850, 5).connect(g);
+          g.connect(audio.master);
+          o.start(t0);
+          o.stop(t0 + dur + 0.05);
+        });
+      },
+      jingle() {
+        for (let i = 0; i < 8; i++) {
+          noise({ filter: 'bandpass', f: 6500, q: 8, dur: 0.09, gain: 0.12, at: i * 0.14 });
+          tone({ f: i % 2 ? 3136 : 2637, dur: 0.12, gain: 0.03, at: i * 0.14 });
+        }
+      },
+    };
+    const rawLoops = {
+      rumble: () => startLoop((ctx, out) => {
+        const low = noiseSource(ctx), lp = filtered(ctx, low, 'lowpass', 240);
+        lp.connect(out);
+        const crackle = noiseSource(ctx), cg = ctx.createGain();
+        cg.gain.value = 0.2;
+        filtered(ctx, crackle, 'bandpass', 1000, 0.7).connect(cg).connect(out);
+        return { sources: [low, crackle, lfo(ctx, 13, 90, lp.frequency)] };
+      }),
+      wind: () => startLoop((ctx, out) => {
+        const n = noiseSource(ctx), bp = filtered(ctx, n, 'bandpass', 420, 0.5);
+        bp.connect(out);
+        return { sources: [n, lfo(ctx, 0.31, 260, bp.frequency)] };
+      }),
+      motor: () => startLoop((ctx, out) => {
+        const osc = ctx.createOscillator(), buzz = ctx.createOscillator(), bg = ctx.createGain();
+        osc.type = 'sawtooth';
+        buzz.type = 'square';
+        osc.frequency.value = 58;
+        buzz.frequency.value = 116;
+        bg.gain.value = 0.3;
+        const lp = filtered(ctx, osc, 'lowpass', 500);
+        buzz.connect(bg).connect(lp);
+        lp.connect(out);
+        osc.start();
+        buzz.start();
+        return { sources: [osc, buzz], setPitch(hz) { osc.frequency.value = hz; buzz.frequency.value = hz * 2; } };
+      }),
+    };
+    // audio must never break the visuals: every call is guarded
+    const guard = (table, fallback) => Object.fromEntries(Object.entries(table).map(([k, fn]) => [k, (...a) => {
+      try { return fn(...a); } catch (e) { console.warn('[audio]', k, e); return fallback; }
+    }]));
+    const sfx = guard(rawSfx);
+    const loops = guard(rawLoops, { set() {}, stop() {}, setPitch() {} });
+    function stopLoops() { [...audio.loops].forEach((h) => h.stop()); }
+
+    const muteBtn = document.getElementById('mute');
+    muteBtn.addEventListener('click', () => {
+      audio.muted = !audio.muted;
+      muteBtn.textContent = audio.muted ? '🔇' : '🔊';
+      if (audio.master) audio.master.gain.value = audio.muted ? 0 : 0.9;
+    });
+
+    // ---------- geometry helpers ----------
+    function samplePoints(geometry, count) {
+      const sampler = new MeshSurfaceSampler(new THREE.Mesh(geometry)).build();
+      const p = new THREE.Vector3();
+      const out = [];
+      for (let i = 0; i < count; i++) {
+        sampler.sample(p);
+        out.push(p.clone());
+      }
+      return out;
+    }
+
+    function transformed(geometry, { pos = [0, 0, 0], rot = [0, 0, 0], scale = [1, 1, 1] }) {
+      const m = new THREE.Matrix4().compose(
+        new THREE.Vector3(...pos),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(...rot)),
+        new THREE.Vector3(...scale)
+      );
+      return geometry.applyMatrix4(m);
+    }
+
+    // cylinder between two points
+    function rod(a, b, radius = 0.05) {
+      const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b);
+      const dir = B.clone().sub(A);
+      const geo = new THREE.CylinderGeometry(radius, radius, dir.length(), 12);
+      geo.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize()));
+      return geo.translate(...A.clone().add(B).multiplyScalar(0.5).toArray());
+    }
+
+    // surface presets
+    const PLASTIC = { roughness: 0.35, clearcoat: 1, clearcoatRoughness: 0.1 };
+    const STEEL = { metalness: 0.9, roughness: 0.28 };
+    const CHROME = { metalness: 0.6, roughness: 0.25 }; // not a full mirror: there is only sky and grass to reflect
+    const BRASS = { metalness: 1, roughness: 0.3 };
+    const PAINTED = { metalness: 0.3, roughness: 0.45 };
+    const WOOD = { roughness: 0.5, clearcoat: 0.5, clearcoatRoughness: 0.3 };
+    const MATTE = { roughness: 0.95 };
+
+    function makeMat(color, m = {}) {
+      const params = { color: color.clone(), roughness: 0.6, metalness: 0, ...m };
+      return 'clearcoat' in m ? new THREE.MeshPhysicalMaterial(params) : new THREE.MeshStandardMaterial(params);
+    }
+
+    // Build one object two ways from the same part list:
+    //  - points: surface samples the particle morph flies to
+    //  - group:  the solid, lit model that replaces the particles once they arrive
+    // parts = [{ share, color, geo | geos, m, material, name }]; share 0/undefined = solid-only detail,
+    // name = put the meshes in a sub-group (named[name]) so it can be animated.
+    function buildModel(parts, yOffset = 0, count = COUNT) {
+      const group = new THREE.Group();
+      group.position.y = yOffset;
+      group.visible = false;
+      const named = {};
+      const points = [];
+      const sampled = parts.filter((p) => p.share);
+      let remaining = count;
+      for (const part of parts) {
+        const geos = part.geos ?? [part.geo];
+        const material = part.material ?? makeMat(part.color, part.m);
+        let holder = group;
+        if (part.name) {
+          if (!named[part.name]) group.add((named[part.name] = new THREE.Group()));
+          holder = named[part.name];
+        }
+        for (const g of geos) {
+          const mesh = new THREE.Mesh(g, material);
+          mesh.castShadow = mesh.receiveShadow = true;
+          holder.add(mesh);
+        }
+        if (part.share) {
+          const n = part === sampled[sampled.length - 1] ? remaining : Math.round(count * part.share);
+          remaining -= n;
+          const per = Math.ceil(n / geos.length);
+          for (const p of geos.flatMap((g) => samplePoints(g, per)).slice(0, n)) {
+            p.y += yOffset;
+            points.push({ p, c: part.color });
+          }
+        }
+      }
+      return { points, group, named };
+    }
+
+    // make a named sub-group rotate/scale about a point instead of the origin
+    function setPivot(holder, x, y, z) {
+      holder.position.set(x, y, z);
+      holder.children.forEach((c) => c.position.set(-x, -y, -z));
+    }
+
+    // ---------- digits: glossy solid numbers with a vertical colour gradient ----------
+    const DIGIT_R = 0.28;
+    const cTop = C(0x35b8ff);
+    const cBottom = C(0xa63dff);
+    const gradientAt = (y) => cBottom.clone().lerp(cTop, clamp((y + 1.6) / 3.3, 0, 1));
+    const digitMaterial = new THREE.MeshPhysicalMaterial({ vertexColors: true, roughness: 0.3, clearcoat: 1, clearcoatRoughness: 0.15 });
+
+    function paintGradient(geo) {
+      const pos = geo.attributes.position;
+      const col = new Float32Array(pos.count * 3);
+      for (let i = 0; i < pos.count; i++) {
+        const c = gradientAt(pos.getY(i));
+        col.set([c.r, c.g, c.b], i * 3);
+      }
+      geo.setAttribute('color', new THREE.BufferAttribute(col, 3));
+      return geo;
+    }
+
+    // paths = the strokes of the digit (one, or two for the 4)
+    function buildDigit(paths) {
+      const group = new THREE.Group();
+      group.visible = false;
+      const total = paths.reduce((s, p) => s + p.getLength(), 0);
+      const points = [];
+      let remaining = COUNT;
+      paths.forEach((path, i) => {
+        // spheres round off the ends and any sharp corners between segments
+        const joints = path.curves
+          ? [path.curves[0].getPoint(0), ...path.curves.map((c) => c.getPoint(1))]
+          : [path.getPoint(0), path.getPoint(1)];
+        const geos = [
+          new THREE.TubeGeometry(path, 300, DIGIT_R, 24, false),
+          ...joints.map((j) => new THREE.SphereGeometry(DIGIT_R, 24, 16).translate(j.x, j.y, j.z)),
+        ];
+        for (const g of geos) {
+          const mesh = new THREE.Mesh(paintGradient(g), digitMaterial);
+          mesh.castShadow = true;
+          group.add(mesh);
+        }
+        const n = i === paths.length - 1 ? remaining : Math.round((COUNT * path.getLength()) / total);
+        remaining -= n;
+        const capN = Math.round(n * 0.025);
+        const pts = [
+          ...samplePoints(geos[0], n - capN * 2),
+          ...samplePoints(geos[1], capN),
+          ...samplePoints(geos[geos.length - 1], capN),
+        ];
+        for (const p of pts) points.push({ p, c: gradientAt(p.y) });
+      });
+      return { points, group };
+    }
+
+    // ---------- digit paths ----------
+    // "1": small flag, then straight down
+    const onePath = new THREE.CurvePath();
+    onePath.add(new THREE.LineCurve3(new THREE.Vector3(-0.5, 0.85, 0), new THREE.Vector3(0, 1.4, 0)));
+    onePath.add(new THREE.LineCurve3(new THREE.Vector3(0, 1.4, 0), new THREE.Vector3(0, -1.4, 0)));
+
+    // "2": arc, diagonal, base
+    const arcPts = [];
+    for (let a = THREE.MathUtils.degToRad(160); a >= THREE.MathUtils.degToRad(-35); a -= 0.05) {
+      arcPts.push(new THREE.Vector3(Math.cos(a) * 0.85, 0.75 + Math.sin(a) * 0.85, 0));
+    }
+    const twoBL = new THREE.Vector3(-0.95, -1.35, 0);
+    const twoBR = new THREE.Vector3(1.05, -1.35, 0);
+    const twoPath = new THREE.CurvePath();
+    twoPath.add(new THREE.CatmullRomCurve3(arcPts));
+    twoPath.add(new THREE.LineCurve3(arcPts[arcPts.length - 1].clone(), twoBL));
+    twoPath.add(new THREE.LineCurve3(twoBL, twoBR));
+
+    // "3": two stacked arcs
+    const threePts = [];
+    for (let a = 150; a >= -90; a -= 4) {
+      const r = THREE.MathUtils.degToRad(a);
+      threePts.push(new THREE.Vector3(Math.cos(r) * 0.7, 0.7 + Math.sin(r) * 0.7, 0));
+    }
+    for (let a = 86; a >= -150; a -= 4) {
+      const r = THREE.MathUtils.degToRad(a);
+      threePts.push(new THREE.Vector3(Math.cos(r) * 0.75, -0.75 + Math.sin(r) * 0.75, 0));
+    }
+    const threePath = new THREE.CatmullRomCurve3(threePts);
+
+    // "4": diagonal + crossbar, then a separate stem
+    const fourA = new THREE.Vector3(0.35, 1.4, 0);
+    const fourB = new THREE.Vector3(-0.95, -0.35, 0);
+    const fourC = new THREE.Vector3(1.0, -0.35, 0);
+    const fourPath = new THREE.CurvePath();
+    fourPath.add(new THREE.LineCurve3(fourA, fourB));
+    fourPath.add(new THREE.LineCurve3(fourB, fourC));
+    const stemPath = new THREE.LineCurve3(new THREE.Vector3(0.35, 1.05, 0), new THREE.Vector3(0.35, -1.4, 0));
+
+    // "5": top bar, stem, belly
+    const fiveBarRight = new THREE.Vector3(0.85, 1.4, 0);
+    const fiveTopLeft = new THREE.Vector3(-0.6, 1.4, 0);
+    const fiveStemBottom = new THREE.Vector3(-0.68, 0.25, 0);
+    const bellyPts = [fiveStemBottom.clone()];
+    for (let a = 125; a >= -150; a -= 5) {
+      const r = THREE.MathUtils.degToRad(a);
+      bellyPts.push(new THREE.Vector3(Math.cos(r) * 0.85, -0.45 + Math.sin(r) * 0.85, 0));
+    }
+    const bellyCurve = new THREE.CatmullRomCurve3(bellyPts);
+    const fivePath = new THREE.CurvePath();
+    fivePath.add(new THREE.LineCurve3(fiveBarRight, fiveTopLeft));
+    fivePath.add(new THREE.LineCurve3(fiveTopLeft, fiveStemBottom));
+    fivePath.add(bellyCurve);
+
+    // "6": sweep down from the top-right into a loop
+    const sixPts = [new THREE.Vector3(0.7, 1.45, 0), new THREE.Vector3(0.1, 1.3, 0), new THREE.Vector3(-0.5, 0.75, 0)];
+    for (let a = 180; a <= 525; a += 6) {
+      const r = THREE.MathUtils.degToRad(a);
+      sixPts.push(new THREE.Vector3(Math.cos(r) * 0.8, -0.6 + Math.sin(r) * 0.8, 0));
+    }
+    const sixPath = new THREE.CatmullRomCurve3(sixPts);
+
+    // "7": top bar, then the long diagonal
+    const sevenR = new THREE.Vector3(0.55, 1.4, 0);
+    const sevenPath = new THREE.CurvePath();
+    sevenPath.add(new THREE.LineCurve3(new THREE.Vector3(-0.75, 1.4, 0), sevenR));
+    sevenPath.add(new THREE.LineCurve3(sevenR, new THREE.Vector3(-0.25, -1.4, 0)));
+
+    // "8": figure-eight, starting at the top heading left
+    const eightPts = [];
+    for (let t = Math.PI / 2; t <= Math.PI / 2 + Math.PI * 2 + 0.001; t += 0.06) {
+      eightPts.push(new THREE.Vector3(1.5 * Math.sin(t) * Math.cos(t), 1.45 * Math.sin(t), 0));
+    }
+    const eightPath = new THREE.CatmullRomCurve3(eightPts);
+
+    // "9": loop first (from its right side, going up and around), then the stem
+    const ninePts = [];
+    for (let a = 10; a <= 370; a += 6) {
+      const r = THREE.MathUtils.degToRad(a);
+      ninePts.push(new THREE.Vector3(Math.cos(r) * 0.68, 0.72 + Math.sin(r) * 0.68, 0));
+    }
+    const ninePath = new THREE.CurvePath();
+    ninePath.add(new THREE.CatmullRomCurve3(ninePts));
+    ninePath.add(new THREE.LineCurve3(ninePts[ninePts.length - 1].clone(), new THREE.Vector3(0.62, -1.45, 0)));
+
+    // ---------- Santa Claus (rides the slide, carries the walking stick and the lollipop) ----------
+    // A jointed figure with human proportions (about 6.5 heads tall): hips, knees, shoulders and elbows
+    // all bend. Faces +X, feet at the origin, hips at y = 0.85.
+    const fabricTex = canvasTexture(128, (g, s) => {
+      g.fillStyle = '#808080';
+      g.fillRect(0, 0, s, s);
+      for (let i = 0; i < 6000; i++) {
+        const v = 80 + Math.floor(rand() * 100);
+        g.fillStyle = `rgb(${v},${v},${v})`;
+        g.fillRect(rand() * s, rand() * s, 1 + rand(), 1 + rand());
+      }
+    });
+    fabricTex.wrapS = fabricTex.wrapT = THREE.RepeatWrapping;
+    fabricTex.repeat.set(6, 6);
+    const SANTA = {
+      // velvet: rough, with a soft sheen at grazing angles
+      suit: new THREE.MeshPhysicalMaterial({
+        color: 0xb3121a, roughness: 0.85, sheen: 1, sheenColor: C(0xff7a7a), sheenRoughness: 0.45,
+        bumpMap: fabricTex, bumpScale: 0.4, side: THREE.DoubleSide,
+      }),
+      fur: new THREE.MeshStandardMaterial({ color: 0xf8f6f1, roughness: 1 }),
+      skin: new THREE.MeshPhysicalMaterial({ color: 0xe6b494, roughness: 0.55, sheen: 0.5, sheenColor: C(0xffb9a0), sheenRoughness: 0.6 }),
+      rosy: new THREE.MeshStandardMaterial({ color: 0xdf8d7e, roughness: 0.5 }),
+      leather: new THREE.MeshPhysicalMaterial({ color: 0x15110e, roughness: 0.35, clearcoat: 0.6, clearcoatRoughness: 0.3, side: THREE.DoubleSide }),
+      gold: new THREE.MeshStandardMaterial({ color: 0xe0a800, metalness: 1, roughness: 0.25 }),
+      eyeWhite: new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 0.2 }),
+      iris: new THREE.MeshStandardMaterial({ color: 0x3b6ea8, roughness: 0.2 }),
+      dark: new THREE.MeshStandardMaterial({ color: 0x120c0a, roughness: 0.3 }),
+      mouth: new THREE.MeshStandardMaterial({ color: 0x7a2a2a, roughness: 0.6 }),
+    };
+
+    function limb(a, b, radius, material) {
+      const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b);
+      const dir = B.clone().sub(A);
+      const mesh = new THREE.Mesh(new THREE.CapsuleGeometry(radius, dir.length(), 6, 14), material);
+      mesh.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir.normalize());
+      mesh.position.copy(A.add(B).multiplyScalar(0.5));
+      return mesh;
+    }
+    function ball(radius, material, pos, scale = [1, 1, 1]) {
+      const mesh = new THREE.Mesh(new THREE.SphereGeometry(radius, 20, 14), material);
+      mesh.position.set(...pos);
+      mesh.scale.set(...scale);
+      return mesh;
+    }
+    // fluffy fur: lots of small overlapping tufts merged into one mesh. points = [x, y, z, radius?]
+    function fluff(points, radius, jitter = 0.4) {
+      const j = (r) => (rand() - 0.5) * r * jitter;
+      return new THREE.Mesh(mergeGeometries(points.map(([x, y, z, r = radius]) =>
+        new THREE.SphereGeometry(r * (0.8 + rand() * 0.45), 7, 5).translate(x + j(r), y + j(r), z + j(r)))), SANTA.fur);
+    }
+    const ringPts = (n, fn) => Array.from({ length: n }, (_, i) => fn((i / n) * Math.PI * 2));
+
+    // the coat is a lathe profile [radius, height above the hips], squashed front-to-back
+    // and pushed out at the front into a proper belly
+    const COAT = [[0.3, -0.24], [0.295, -0.1], [0.31, 0.05], [0.325, 0.16], [0.31, 0.3], [0.275, 0.42], [0.225, 0.51], [0.13, 0.575], [0.085, 0.6]];
+    function coatR(y) {
+      for (let i = 1; i < COAT.length; i++) {
+        if (y <= COAT[i][1]) return lerp(COAT[i - 1][0], COAT[i][0], clamp((y - COAT[i - 1][1]) / (COAT[i][1] - COAT[i - 1][1]), 0, 1));
+      }
+      return COAT[COAT.length - 1][0];
+    }
+    const COAT_FLAT = 0.9;
+    const bellyBulge = (y) => 1 + 0.2 * Math.exp(-(((y - 0.12) / 0.2) ** 2));
+    function shapeTorso(geo) {
+      const pos = geo.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const x = pos.getX(i);
+        pos.setXYZ(i, x > 0 ? x * bellyBulge(pos.getY(i)) : x, pos.getY(i), pos.getZ(i) * COAT_FLAT);
+      }
+      geo.computeVertexNormals();
+      return geo;
+    }
+    // x of the coat's surface at height y and sideways offset z (front half)
+    const coatFront = (y, z = 0) => Math.sqrt(Math.max(0, coatR(y) ** 2 - (z / COAT_FLAT) ** 2)) * bellyBulge(y);
+
+    // floppy hat: a cone whose centre line curls over backwards
+    function hatGeometry(R, H, bend) {
+      const centre = (t) => { // walk the bent centre line up to t (0 = brim, 1 = tip)
+        let x = 0, y = 0;
+        const N = 24;
+        for (let k = 0; k < N; k++) {
+          const a = Math.PI / 2 + bend * (((k + 0.5) / N) * t) ** 2;
+          x += (Math.cos(a) * H * t) / N;
+          y += (Math.sin(a) * H * t) / N;
+        }
+        return [x, y];
+      };
+      const geo = new THREE.ConeGeometry(R, H, 24, 16, true);
+      const pos = geo.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const t = (pos.getY(i) + H / 2) / H, a = Math.PI / 2 + bend * t * t;
+        const [cx, cy] = centre(t), x = pos.getX(i);
+        pos.setXYZ(i, cx + x * Math.sin(a), cy - x * Math.cos(a), pos.getZ(i));
+      }
+      geo.computeVertexNormals();
+      return { geo, tip: centre(1) };
+    }
+
+    function makeSanta() {
+      const M = SANTA;
+      const santa = new THREE.Group();
+      const body = new THREE.Group(); // everything; bobs up and down with the stride
+      santa.add(body);
+
+      // --- legs: thigh -> knee -> shin tucked into a fur-topped boot ---
+      const legs = [];
+      for (const side of [1, -1]) {
+        const hip = new THREE.Group();
+        hip.position.set(0, 0.85, side * 0.115);
+        hip.add(limb([0, 0, 0], [0, -0.42, 0], 0.105, M.suit));
+        const knee = new THREE.Group();
+        knee.position.y = -0.42;
+        knee.add(ball(0.098, M.suit, [0, 0, 0]), limb([0, 0, 0], [0, -0.16, 0], 0.09, M.suit));
+        const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.094, 0.084, 0.25, 20), M.leather);
+        shaft.position.y = -0.27;
+        knee.add(
+          shaft,
+          fluff(ringPts(10, (a) => [Math.cos(a) * 0.092, -0.15, Math.sin(a) * 0.092]), 0.036),
+          ball(0.09, M.leather, [0.065, -0.375, 0], [1.75, 0.62, 1.02]),  // foot
+          ball(0.07, M.leather, [-0.01, -0.36, 0], [1, 0.9, 1.1]),        // heel
+        );
+        hip.add(knee);
+        body.add(hip);
+        legs.push({ hip, knee });
+      }
+
+      // --- torso: velvet coat over a round belly, fur trim, leather belt with a brass buckle ---
+      const upper = new THREE.Group();
+      upper.position.y = 0.85;
+      body.add(upper);
+      const profile = new THREE.SplineCurve(COAT.map(([r, y]) => new THREE.Vector2(r, y))).getPoints(36);
+      upper.add(new THREE.Mesh(shapeTorso(new THREE.LatheGeometry(profile, 48)), M.suit));
+      const BELT_Y = 0.07;
+      upper.add(new THREE.Mesh(
+        shapeTorso(new THREE.CylinderGeometry(coatR(BELT_Y) + 0.012, coatR(BELT_Y) + 0.012, 0.085, 48, 1, true).translate(0, BELT_Y, 0)), M.leather));
+      const buckle = new THREE.Mesh(new THREE.TorusGeometry(0.062, 0.013, 8, 4).rotateZ(Math.PI / 4).rotateY(Math.PI / 2), M.gold);
+      buckle.position.set(coatFront(BELT_Y) + 0.022, BELT_Y, 0);
+      const prong = new THREE.Mesh(new THREE.BoxGeometry(0.012, 0.012, 0.08), M.gold);
+      prong.position.copy(buckle.position);
+      upper.add(buckle, prong);
+      // fur: hem, the strip down the front (skipping the belt), collar
+      const strip = [];
+      for (let y = -0.2; y <= 0.5; y += 0.045) if (Math.abs(y - BELT_Y) > 0.065) strip.push([coatFront(y) + 0.012, y, 0]);
+      upper.add(
+        fluff(ringPts(28, (a) => [Math.cos(a) * 0.3 * (Math.cos(a) > 0 ? bellyBulge(-0.24) : 1), -0.24, Math.sin(a) * 0.3 * COAT_FLAT]), 0.052),
+        fluff(strip, 0.043),
+        fluff(ringPts(14, (a) => [Math.cos(a) * 0.125 + 0.01, 0.565, Math.sin(a) * 0.125]), 0.047),
+        limb([0, 0.58, 0], [0.012, 0.67, 0], 0.055, M.skin), // neck
+      );
+
+      // --- arms: shoulder -> elbow -> fur cuff -> black leather mitten ---
+      const arms = [];
+      for (const side of [1, -1]) {
+        const shoulder = new THREE.Group();
+        shoulder.position.set(0, 0.49, side * 0.25);
+        shoulder.add(ball(0.092, M.suit, [0, 0, 0]), limb([0, 0, 0], [0, -0.3, 0], 0.076, M.suit));
+        const elbow = new THREE.Group();
+        elbow.position.y = -0.3;
+        const hand = ball(0.06, M.leather, [0.005, -0.345, 0], [0.9, 1.2, 0.75]);
+        elbow.add(
+          ball(0.072, M.suit, [0, 0, 0]),
+          limb([0, 0, 0], [0, -0.24, 0], 0.066, M.suit),
+          fluff(ringPts(9, (a) => [Math.cos(a) * 0.066, -0.265, Math.sin(a) * 0.066]), 0.033),
+          hand,
+          ball(0.026, M.leather, [0.05, -0.32, 0], [1, 1.5, 1]), // thumb
+        );
+        shoulder.add(elbow);
+        upper.add(shoulder);
+        arms.push({ shoulder, elbow, hand });
+      }
+
+      // --- head ---
+      const head = new THREE.Group();
+      head.position.set(0.015, 0.76, 0);
+      upper.add(head);
+      head.add(
+        ball(0.125, M.skin, [0, 0, 0], [0.97, 1.1, 0.92]),
+        ball(0.03, M.rosy, [0.124, -0.008, 0], [1, 0.95, 1.05]),                       // nose
+        limb([0.112, -0.06, 0.016], [0.112, -0.06, -0.016], 0.008, M.mouth),            // mouth, under the moustache
+      );
+      for (const side of [1, -1]) {
+        head.add(
+          ball(0.019, M.eyeWhite, [0.097, 0.028, side * 0.046], [0.7, 1, 1.15]),
+          ball(0.0105, M.iris, [0.109, 0.028, side * 0.046]),
+          ball(0.006, M.dark, [0.1165, 0.028, side * 0.046]),
+          ball(0.034, M.rosy, [0.09, -0.026, side * 0.064], [0.5, 0.8, 1]),              // rosy cheek
+          ball(0.032, M.skin, [-0.005, 0, side * 0.115], [0.6, 1, 0.4]),                 // ear
+          fluff([[0.113, 0.064, side * 0.03], [0.112, 0.068, side * 0.048], [0.106, 0.064, side * 0.066]], 0.013, 0.2), // bushy brow
+          // moustache: thick by the nose, tapering out and down
+          fluff([[0.128, -0.036, side * 0.014, 0.024], [0.124, -0.042, side * 0.04, 0.022], [0.114, -0.05, side * 0.066, 0.018], [0.1, -0.058, side * 0.088, 0.013]], 0.02, 0.2),
+        );
+        // small round gold spectacles
+        const rim = new THREE.Mesh(new THREE.TorusGeometry(0.029, 0.0035, 6, 24).rotateY(Math.PI / 2), M.gold);
+        rim.position.set(0.121, 0.028, side * 0.046);
+        head.add(rim, limb([0.118, 0.03, side * 0.075], [0, 0.03, side * 0.118], 0.003, M.gold));
+      }
+      head.add(limb([0.123, 0.032, 0.017], [0.123, 0.032, -0.017], 0.003, M.gold)); // bridge
+
+      // full beard: from the sideburns round the jaw, hanging down and draped over the chest
+      const beard = [];
+      for (let i = 0; i < 170; i++) {
+        const phi = (rand() * 2 - 1) * 1.85, front = Math.cos(phi) * 0.5 + 0.5, v = rand();
+        const y = lerp(0.0, -0.075, front) - v * (0.07 + 0.2 * front ** 1.5); // longest at the chin
+        const spread = 1 - v * 0.3;
+        const z = Math.sin(phi) * 0.112 * spread * 0.95;
+        // never sink into the coat: rest on its surface (head coordinates -> torso coordinates and back)
+        const x = Math.max(Math.cos(phi) * 0.112 * spread + 0.012, coatFront(y + head.position.y, z) - head.position.x + 0.012);
+        beard.push([x, y, z, 0.035 * (1 - v * 0.35)]);
+      }
+      // white hair round the back, below the hat
+      const hair = [];
+      for (let i = 0; i < 45; i++) {
+        const phi = lerp(1.75, Math.PI * 2 - 1.75, rand());
+        hair.push([Math.cos(phi) * 0.118, lerp(-0.1, 0.03, rand()), Math.sin(phi) * 0.112]);
+      }
+      // hat: fur brim, floppy velvet cone, pom-pom at the tip
+      const hatBase = 0.075;
+      const { geo: hatGeo, tip } = hatGeometry(0.118, 0.44, 2.3);
+      const hat = new THREE.Mesh(hatGeo, M.suit);
+      hat.position.set(-0.005, hatBase, 0);
+      hat.scale.z = 0.95;
+      head.add(
+        fluff(beard, 0.035),
+        fluff(hair, 0.03),
+        hat,
+        fluff(ringPts(18, (a) => [Math.cos(a) * 0.123 - 0.005, hatBase + Math.cos(a) * 0.012, Math.sin(a) * 0.116]), 0.038),
+        fluff(ringPts(7, (a) => [tip[0] - 0.005 + Math.cos(a) * 0.02, hatBase + tip[1] + Math.sin(a) * 0.02, Math.sin(a * 2) * 0.02]), 0.04),
+      );
+
+      santa.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+      santa.userData = { body, legs, arms, upper, head, hand: arms[0].hand, stride: 5.5, reachAngle: 0.15, carryElbow: 0.35 };
+      return santa;
+    }
+
+    // Walk cycle; fires onStep at each footfall. holding = 1 keeps arms[0] in its carrying pose.
+    function poseWalk(fig, t, walking, holding) {
+      const d = fig.userData;
+      const ph = t * d.stride, s = walking ? Math.sin(ph) : 0, c = walking ? Math.cos(ph) : 0;
+      d.legs.forEach((leg, i) => {
+        const dir = i ? -1 : 1;
+        leg.hip.rotation.z = dir * s * 0.4;
+        leg.knee.rotation.z = -0.04 - Math.max(0, dir * c) * 0.7; // knee bends as that leg swings forward
+      });
+      // the free arm swings against its leg, elbow loosening on the forward swing
+      d.arms[1].shoulder.rotation.set(0, 0, s * 0.4);
+      d.arms[1].elbow.rotation.z = 0.25 + Math.max(0, s) * 0.3;
+      d.arms[0].shoulder.rotation.set(0, 0, holding ? 0.35 + d.reachAngle + s * 0.04 : -s * 0.4);
+      d.arms[0].elbow.rotation.z = holding ? d.carryElbow : 0.25 + Math.max(0, -s) * 0.3;
+      d.body.position.y = -(1 - Math.cos(s * 0.4)) * 0.7;  // hips dip when the legs are apart
+      d.upper.rotation.set(0, s * 0.07, -0.04);            // shoulders twist with the stride, slight forward lean
+      d.head.rotation.set(0, -s * 0.05, 0);
+      const sign = s >= 0 ? 1 : -1;
+      if (walking && sign !== d.lastSign) d.onStep?.(sign);
+      d.lastSign = sign;
+    }
+
+    // Sitting pose for the slide: legs out in front, arms thrown up and waving
+    function poseRide(fig, time, phase, ride) {
+      const d = fig.userData;
+      d.legs.forEach((leg, i) => {
+        leg.hip.rotation.z = 1.45 + Math.sin(time * 6 + phase + i * 2) * 0.07 * ride;
+        leg.knee.rotation.z = -0.3;
+      });
+      d.arms.forEach((arm, i) => {
+        // up and forward (clear of the face), spread apart, waving
+        arm.shoulder.rotation.set((i ? -1 : 1) * (0.45 + Math.sin(time * 9 + phase * 3 + i) * 0.3 * ride), 0, 2.2);
+        arm.elbow.rotation.z = 0.25;
+      });
+      d.upper.rotation.set(0, 0, 0.12); // leaning back a little
+      d.head.rotation.set(0, 0, Math.sin(time * 5 + phase) * 0.1 * ride);
+    }
+
+    // four Santas take turns on the slide; each sits in a wrapper whose origin is his seat
+    const kids = [0.0, 1.1, 2.2, 3.3].map((offset) => {
+      const rig = makeSanta();
+      rig.position.y = -0.85;
+      const obj = new THREE.Group();
+      obj.add(rig);
+      return { offset, obj, rig };
+    });
+    const santa = makeSanta();
+    santa.scale.setScalar(1.4);
+    santa.visible = false;
+    scene.add(santa);
+    const WALK_SPEED = 0.75;
+
+    // ---------- the stage: everything a digit turns into lives in this group ----------
+    const stage = new THREE.Group();
+    scene.add(stage);
+
+    // ---------- 1 → rocket ----------
+    const red = C(0xd92b2b);
+    const finGeo = (angle) => transformed(new THREE.BoxGeometry(0.06, 0.7, 0.55), {
+      pos: [Math.sin(angle) * 0.6, -0.75, Math.cos(angle) * 0.6], rot: [0, angle, 0],
+    });
+    const ROCKET_BOTTOM = -1.15;
+    const rocket = buildModel([
+      { share: 0.50, color: C(0xe9edf3), m: { metalness: 0.6, roughness: 0.3 }, geo: new THREE.CylinderGeometry(0.45, 0.45, 2.0, 48) },
+      { share: 0.18, color: red, m: PAINTED, geo: new THREE.ConeGeometry(0.45, 0.9, 48).translate(0, 1.45, 0) },
+      { share: 0.22, color: red, m: PAINTED, geos: [finGeo(0), finGeo((Math.PI * 2) / 3), finGeo((Math.PI * 4) / 3)] },
+      { share: 0.10, color: C(0x4fd1ff), m: { metalness: 0.2, roughness: 0.05 }, geo: transformed(new THREE.SphereGeometry(0.2, 24, 16), { pos: [0, 0.4, 0.42], scale: [1, 1, 0.35] }) },
+      // solid-only details
+      { color: C(0xc7ccd6), m: STEEL, geo: new THREE.TorusGeometry(0.21, 0.035, 12, 32).translate(0, 0.4, 0.45) },
+      { color: red, m: PAINTED, geo: new THREE.CylinderGeometry(0.456, 0.456, 0.14, 48).translate(0, 0.85, 0) },
+      { color: C(0x30343c), m: { metalness: 0.9, roughness: 0.4 }, geo: new THREE.CylinderGeometry(0.28, 0.4, 0.18, 32).translate(0, -1.06, 0) },
+    ]);
+    // engine flame (hidden until ignition): scaled from the nozzle so it can flicker
+    const flame = new THREE.Group();
+    flame.position.y = ROCKET_BOTTOM;
+    flame.visible = false;
+    flame.add(
+      new THREE.Mesh(new THREE.ConeGeometry(0.3, 1.5, 24).rotateX(Math.PI).translate(0, -0.75, 0),
+        new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.85, toneMapped: false })),
+      new THREE.Mesh(new THREE.ConeGeometry(0.17, 0.95, 24).rotateX(Math.PI).translate(0, -0.475, 0),
+        new THREE.MeshBasicMaterial({ color: 0xfff2b0, toneMapped: false })),
+    );
+    const flameLight = new THREE.PointLight(0xff8a3c, 0, 12);
+    flameLight.position.y = -0.5;
+    flame.add(flameLight);
+    rocket.group.add(flame);
+
+    // exhaust smoke: soft sprites that grow and fade
+    const SMOKE_N = 600;
+    const smokePos = new Float32Array(SMOKE_N * 3);
+    const smokeVel = new Float32Array(SMOKE_N * 3);
+    const smokeLife = new Float32Array(SMOKE_N).fill(1); // 1 = dead
+    const smokeGeo = new THREE.BufferGeometry();
+    smokeGeo.setAttribute('position', new THREE.BufferAttribute(smokePos, 3));
+    smokeGeo.setAttribute('aLife', new THREE.BufferAttribute(smokeLife, 1));
+    const smokeMat = new THREE.ShaderMaterial({
+      transparent: true, depthWrite: false,
+      uniforms: { uScale: { value: 1 } },
+      vertexShader: /* glsl */ `
+        uniform float uScale;
+        attribute float aLife;
+        varying float vLife;
+        void main() {
+          vLife = aLife;
+          vec4 mv = modelViewMatrix * vec4(position, 1.0);
+          gl_Position = projectionMatrix * mv;
+          gl_PointSize = aLife >= 1.0 ? 0.0 : uScale * mix(0.35, 1.7, aLife) / -mv.z;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        varying float vLife;
+        void main() {
+          float d = length(gl_PointCoord - 0.5);
+          if (d > 0.5) discard;
+          float a = smoothstep(0.5, 0.05, d) * pow(1.0 - vLife, 1.3) * 0.55;
+          vec3 c = mix(vec3(1.0, 0.62, 0.2), vec3(0.82, 0.82, 0.84), smoothstep(0.0, 0.22, vLife));
+          gl_FragColor = vec4(c, a);
+          #include <colorspace_fragment>
+        }
+      `,
+    });
+    const smoke = new THREE.Points(smokeGeo, smokeMat);
+    smoke.frustumCulled = false;
+    scene.add(smoke);
+    let smokeCursor = 0;
+    function emitSmoke(x, y, n) {
+      const nearGround = y - GROUND_Y < 0.6; // billows sideways on the pad, streams down in flight
+      for (let k = 0; k < n; k++) {
+        const i = (smokeCursor = (smokeCursor + 1) % SMOKE_N) * 3;
+        const a = rand() * Math.PI * 2, sp = nearGround ? 1.5 + rand() * 2.5 : rand() * 0.6;
+        smokePos.set([x + (rand() - 0.5) * 0.3, y + rand() * 0.2, (rand() - 0.5) * 0.3], i);
+        smokeVel.set([Math.cos(a) * sp, nearGround ? rand() * 0.4 : -(2 + rand() * 2), Math.sin(a) * sp * 0.6], i);
+        smokeLife[i / 3] = 0;
+      }
+    }
+    function updateSmoke(dt) {
+      for (let n = 0; n < SMOKE_N; n++) {
+        if (smokeLife[n] >= 1) continue;
+        const i = n * 3;
+        smokeLife[n] = Math.min(1, smokeLife[n] + dt / 2.2);
+        smokePos[i] += smokeVel[i] * dt;
+        smokePos[i + 1] += smokeVel[i + 1] * dt;
+        smokePos[i + 2] += smokeVel[i + 2] * dt;
+        smokeVel[i] *= 1 - 1.2 * dt;
+        smokeVel[i + 2] *= 1 - 1.2 * dt;
+        smokeVel[i + 1] += (0.5 - smokeVel[i + 1]) * dt * 1.5; // slows, then drifts upward
+        if (smokePos[i + 1] < GROUND_Y + 0.1) smokePos[i + 1] = GROUND_Y + 0.1;
+      }
+      smokeGeo.attributes.position.needsUpdate = true;
+      smokeGeo.attributes.aLife.needsUpdate = true;
+    }
+
+    // ---------- 2 → rubber duck (facing +X) ----------
+    const duckYellow = C(0xffd21f);
+    const duck = buildModel([
+      { share: 0.38, color: duckYellow, m: PLASTIC, geo: transformed(new THREE.SphereGeometry(1, 48, 32), { scale: [1.4, 0.9, 1.0] }) },
+      { share: 0.20, color: duckYellow, m: PLASTIC, name: 'head', geo: transformed(new THREE.SphereGeometry(0.6, 48, 32), { pos: [1.0, 1.05, 0] }) },
+      { share: 0.08, color: duckYellow, m: PLASTIC, geo: transformed(new THREE.ConeGeometry(0.4, 0.8, 32), { pos: [-1.4, 0.35, 0], rot: [0, 0, 1.04] }) },
+      { share: 0.10, color: C(0xf2a900), m: PLASTIC, name: 'wingR', geo: transformed(new THREE.SphereGeometry(0.55, 32, 16), { pos: [-0.1, 0.15, 0.95], rot: [0, 0, -0.25], scale: [1.2, 0.5, 0.25] }) },
+      { share: 0.10, color: C(0xf2a900), m: PLASTIC, name: 'wingL', geo: transformed(new THREE.SphereGeometry(0.55, 32, 16), { pos: [-0.1, 0.15, -0.95], rot: [0, 0, -0.25], scale: [1.2, 0.5, 0.25] }) },
+      { share: 0.09, color: C(0xff6a00), m: PLASTIC, name: 'head', geo: transformed(new THREE.SphereGeometry(0.3, 32, 16), { pos: [1.6, 0.95, 0], scale: [1.4, 0.45, 1.0] }) },
+      { share: 0.05, color: C(0x111111), m: { roughness: 0.1 }, name: 'head', geos: [0.3, -0.3].map((z) => new THREE.SphereGeometry(0.09, 16, 12).translate(1.45, 1.25, z)) },
+      { color: C(0xffffff), m: { roughness: 0.2 }, name: 'head', geos: [0.34, -0.34].map((z) => new THREE.SphereGeometry(0.028, 8, 6).translate(1.51, 1.29, z)) },
+    ], -0.35);
+    setPivot(duck.named.head, 0.75, 0.55, 0);
+    setPivot(duck.named.wingR, -0.1, 0.4, 0.85);
+    setPivot(duck.named.wingL, -0.1, 0.4, -0.85);
+
+    // ---------- 3 → "3"-shaped tube slide: two see-through loops, like the digit ----------
+    const SLIDE_SCALE = 1.2, SLIDE_GROUND = -2.05, SLIDE_OFFSET = 0.15, TUBE_R = 0.3;
+    const scaled3 = threePts.map((p) => p.clone().multiplyScalar(SLIDE_SCALE));
+    const slideCurve = new THREE.CatmullRomCurve3(scaled3);
+    const slideStart = slideCurve.getPointAt(0);
+    const mid = Math.floor(scaled3.length / 2);
+    const PLAT_Y = slideStart.y - TUBE_R;
+    const ladderX = slideStart.x - 0.75;
+    const ladderParts = [];
+    for (const z of [0.35, -0.35]) ladderParts.push(rod([ladderX - 0.35, SLIDE_GROUND, z], [ladderX, PLAT_Y, z]));
+    for (let i = 1; i <= 8; i++) {
+      const t = i / 9;
+      const x = ladderX - 0.35 + 0.35 * t, y = SLIDE_GROUND + (PLAT_Y - SLIDE_GROUND) * t;
+      ladderParts.push(rod([x, y, 0.35], [x, y, -0.35], 0.03));
+    }
+    const supportParts = [];
+    for (const u of [0.0, 0.3, 0.5, 0.72]) {
+      const p = slideCurve.getPointAt(u);
+      for (const z of [0.18, -0.18]) supportParts.push(rod([p.x, SLIDE_GROUND, z], [p.x, p.y - TUBE_R, z], 0.035));
+    }
+    // tinted clear plastic, so the riders are visible inside
+    const CLEAR = { transparent: true, opacity: 0.42, side: THREE.DoubleSide, depthWrite: false, roughness: 0.12 };
+    const slide = buildModel([
+      { share: 0.36, color: C(0xff3d43), m: CLEAR, geo: new THREE.TubeGeometry(new THREE.CatmullRomCurve3(scaled3.slice(0, mid + 1)), 200, TUBE_R, 24, false) },
+      { share: 0.36, color: C(0x1f8fe8), m: CLEAR, geo: new THREE.TubeGeometry(new THREE.CatmullRomCurve3(scaled3.slice(mid)), 200, TUBE_R, 24, false) },
+      { share: 0.08, color: C(0xffc21a), m: PAINTED, geo: transformed(new THREE.BoxGeometry(0.8, 0.06, 0.8), { pos: [slideStart.x - 0.4, PLAT_Y, 0] }) },
+      { share: 0.12, color: C(0xc9d2e3), m: STEEL, geos: ladderParts },
+      { share: 0.08, color: C(0xc9d2e3), m: STEEL, geos: supportParts },
+    ], SLIDE_OFFSET);
+
+    const kidGroup = new THREE.Group();
+    kidGroup.visible = false;
+    kids.forEach((k) => kidGroup.add(k.obj));
+    stage.add(kidGroup);
+    const SLIDE_CYCLE = 4.4;
+    function updateKids(time) {
+      for (const k of kids) {
+        const cycle = Math.floor((time + k.offset) / SLIDE_CYCLE);
+        const c = (time + k.offset) % SLIDE_CYCLE;
+        let u, scale = 0.36; // small enough to sit inside the tube
+        if (c < 0.5) { u = 0; scale *= c / 0.5; }                             // pop in on the platform
+        else if (c < 3.8) { const s = (c - 0.5) / 3.3; u = s * (0.4 + 0.6 * s); } // ride both loops, speeding up
+        else { u = 1; scale *= 1 - (c - 3.8) / 0.6; }                         // shrink away at the exit
+        if (c >= 0.5 && k.lastWhee !== cycle) {
+          k.lastWhee = cycle;
+          sfx.whee();
+        }
+        const p = slideCurve.getPointAt(u);
+        const t = slideCurve.getTangentAt(u);
+        // seated on the tube's inner wall: shifted off the centre line, away from the kid's own "up"
+        k.obj.position.set(p.x + t.y * TUBE_R * 0.65, p.y + SLIDE_OFFSET - t.x * TUBE_R * 0.65, 0);
+        k.obj.rotation.z = Math.atan2(t.y, t.x); // legs point along the slide
+        k.obj.scale.setScalar(Math.max(0.001, scale));
+        // wave arms and bob head while riding
+        poseRide(k.rig, time, k.offset, u > 0 && u < 1 ? 1 : 0.3);
+      }
+    }
+
+    // ---------- 4 → flag: the stem is the pole, the triangle is a cloth pennant flying left ----------
+    const FLAG_X = 0.32, FLAG_LEN = 1.32;
+    const clothGeo = new THREE.PlaneGeometry(1, 1, 28, 12);
+    const clothRest = []; // per vertex: distance from the pole (0..1) and resting position
+    {
+      const pos = clothGeo.attributes.position, uv = clothGeo.attributes.uv;
+      for (let i = 0; i < pos.count; i++) {
+        const u = uv.getX(i), v = uv.getY(i);
+        const x = FLAG_X - FLAG_LEN * u, y = -0.35 + v * 1.8 * (1 - u);
+        pos.setXYZ(i, x, y, 0);
+        clothRest.push({ u, x, y });
+      }
+      clothGeo.computeVertexNormals();
+    }
+    const flag = buildModel([
+      { share: 0.72, color: C(0xe3262b), m: { side: THREE.DoubleSide, roughness: 0.85 }, geo: clothGeo },
+      { share: 0.22, color: C(0xc9d2e3), m: STEEL, geo: rod([0.35, -1.6, 0], [0.35, 1.55, 0], 0.05) },
+      { share: 0.06, color: C(0xe0a800), m: BRASS, geo: new THREE.SphereGeometry(0.1, 24, 16).translate(0.35, 1.62, 0) },
+      { color: C(0x8a8f98), m: MATTE, geo: new THREE.CylinderGeometry(0.28, 0.36, 0.1, 32).translate(0.35, -1.55, 0) },
+    ]);
+    function waveCloth(t, strength) {
+      const pos = clothGeo.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        const { u, x, y } = clothRest[i];
+        const ph = u * 5 - t * 6 + y * 1.5; // ripple runs from the pole out to the free tip
+        const amp = u * strength;
+        pos.setXYZ(i,
+          x + (Math.cos(ph) - 1) * 0.06 * amp,
+          y + Math.sin(u * 4 - t * 5) * 0.06 * amp,
+          (Math.sin(ph) * 0.3 + Math.sin(u * 11 - t * 10) * 0.05) * amp);
+      }
+      pos.needsUpdate = true;
+      clothGeo.computeVertexNormals();
+    }
+
+    // ---------- 5 → tower crane: top bar = jib, stem = cable, belly = hook carrying a crate ----------
+    const CRANE_OFFSET = -0.15, CRANE_REST = 1.1; // the whole thing hoists up so the crate has room to travel
+    const CABLE_TOP = 1.3, CABLE_LEN = 1.05;
+    const CRATE_BOTTOM = -1.88 - 0.275 + CRANE_OFFSET;
+    const CRANE_MAX_DROP = CRATE_BOTTOM + CRANE_REST - GROUND_Y - 0.01;
+    const craneYellow = C(0xffb300);
+    const jibParts = [rod([-1.3, 1.55, 0], [1.5, 1.55, 0], 0.04), rod([-1.3, 1.3, 0], [1.5, 1.3, 0], 0.04)];
+    for (let x = -1.3; x < 1.5; x += 0.35) {
+      jibParts.push(rod([x, 1.3, 0], [x + 0.175, 1.55, 0], 0.025), rod([x + 0.175, 1.55, 0], [x + 0.35, 1.3, 0], 0.025));
+    }
+    const hookTip = bellyPts[bellyPts.length - 1];
+    const crateTex = canvasTexture(256, (g, s) => {
+      g.fillStyle = '#c98a4b';
+      g.fillRect(0, 0, s, s);
+      for (let i = 0; i < 5; i++) { // planks with grain
+        g.fillStyle = i % 2 ? '#c2823f' : '#d39858';
+        g.fillRect(0, (i * s) / 5, s, s / 5 - 3);
+        g.strokeStyle = 'rgba(90,50,20,0.25)';
+        for (let k = 0; k < 6; k++) {
+          g.beginPath();
+          g.moveTo(0, (i * s) / 5 + rand() * (s / 5));
+          g.lineTo(s, (i * s) / 5 + rand() * (s / 5));
+          g.stroke();
+        }
+      }
+      g.strokeStyle = '#7a4a22';
+      g.lineWidth = 18;
+      g.strokeRect(9, 9, s - 18, s - 18); // frame
+    });
+    const crane = buildModel([
+      { share: 0.30, color: craneYellow, m: PAINTED, geos: jibParts },
+      { share: 0.06, color: C(0x555b66), m: PAINTED, geo: new THREE.BoxGeometry(0.35, 0.22, 0.3).translate(-0.66, 1.3, 0) }, // trolley
+      { share: 0.08, color: C(0x70777f), m: STEEL, name: 'cable', geo: rod([-0.66, CABLE_TOP, 0], [-0.68, CABLE_TOP - CABLE_LEN, 0], 0.025) },
+      { share: 0.30, color: C(0xb9c1cc), m: STEEL, name: 'hook', geo: new THREE.TubeGeometry(bellyCurve, 160, 0.13, 16, false) },
+      { share: 0.03, color: C(0xb9c1cc), m: STEEL, name: 'hook', geos: [new THREE.SphereGeometry(0.13, 16, 12).translate(hookTip.x, hookTip.y, 0), new THREE.SphereGeometry(0.13, 16, 12).translate(-0.68, 0.25, 0)] },
+      { share: 0.05, color: C(0x70777f), m: STEEL, name: 'hook', geos: [rod([0, -1.3, 0], [-0.4, -1.6, 0], 0.02), rod([0, -1.3, 0], [0.4, -1.6, 0], 0.02)] }, // slings
+      { share: 0.18, color: C(0xc98a4b), name: 'hook', material: new THREE.MeshStandardMaterial({ map: crateTex, roughness: 0.8 }), geo: new THREE.BoxGeometry(0.85, 0.55, 0.55).translate(0, -1.88, 0) },
+    ], CRANE_OFFSET);
+    setPivot(crane.named.cable, -0.66, CABLE_TOP, 0);
+    // the tower that holds the jib up: solid-only, rises out of the ground once the crane has formed.
+    // Built in world coordinates, then hung in the stage so it lines up when the stage sits at CRANE_REST.
+    const towerPivot = new THREE.Group();
+    towerPivot.position.set(-1.6, GROUND_Y - CRANE_REST, 0);
+    towerPivot.visible = false;
+    {
+      const inner = new THREE.Group();
+      inner.position.set(1.6, -GROUND_Y, 0);
+      towerPivot.add(inner);
+      const jibY = CABLE_TOP + CRANE_OFFSET + CRANE_REST; // world height of the jib's lower chord
+      const top = jibY + 0.45;
+      const geos = [];
+      for (const x of [-1.8, -1.4]) for (const z of [0.2, -0.2]) geos.push(rod([x, GROUND_Y, z], [x, top, z], 0.04));
+      for (let y = GROUND_Y, i = 0; y < top - 0.2; y += 0.45, i++) {
+        const y2 = Math.min(top, y + 0.45);
+        const [xa, xb] = i % 2 ? [-1.8, -1.4] : [-1.4, -1.8];
+        for (const z of [0.2, -0.2]) geos.push(rod([xa, y, z], [xb, y2, z], 0.022));
+        for (const x of [-1.8, -1.4]) geos.push(rod([x, y2, 0.2], [x, y2, -0.2], 0.022));
+      }
+      // jib root, counter-jib, apex and tie rods
+      for (const y of [jibY, jibY + 0.25]) geos.push(rod([-1.8, y, 0], [-1.3, y, 0], 0.04));
+      for (const z of [0.15, -0.15]) geos.push(rod([-1.8, jibY, z], [-2.9, jibY, z], 0.035));
+      const apex = [-1.6, top + 0.55, 0];
+      for (const x of [-1.8, -1.4]) for (const z of [0.2, -0.2]) geos.push(rod([x, top, z], apex, 0.03));
+      geos.push(rod(apex, [1.5, jibY + 0.25, 0], 0.012), rod(apex, [-2.9, jibY, 0], 0.012));
+      const add = (geo, color, m) => {
+        const mesh = new THREE.Mesh(geo, makeMat(color, m));
+        mesh.castShadow = mesh.receiveShadow = true;
+        inner.add(mesh);
+      };
+      const yellowMat = makeMat(craneYellow, PAINTED);
+      for (const g of geos) {
+        const mesh = new THREE.Mesh(g, yellowMat);
+        mesh.castShadow = true;
+        inner.add(mesh);
+      }
+      add(new THREE.BoxGeometry(0.55, 0.4, 0.45).translate(-2.65, jibY - 0.22, 0), C(0x8d9299), MATTE);    // counterweight
+      add(new THREE.BoxGeometry(0.42, 0.42, 0.42).translate(-1.6, jibY - 0.35, 0.42), C(0xf2f4f7), PAINTED); // cab
+      add(new THREE.BoxGeometry(0.3, 0.2, 0.02).translate(-1.6, jibY - 0.3, 0.64), C(0x4fd1ff), { metalness: 0.2, roughness: 0.05 });
+      add(new THREE.BoxGeometry(1.3, 0.16, 1.3).translate(-1.6, GROUND_Y + 0.08, 0), C(0x9a9fa6), MATTE);   // concrete pad
+    }
+    stage.add(towerPivot);
+
+    // ---------- 6 → big referee whistle: loop = round chamber, top stroke = mouthpiece ----------
+    const mouthCurve = new THREE.CatmullRomCurve3([
+      new THREE.Vector3(-0.6, -0.1, 0), new THREE.Vector3(-0.45, 0.6, 0),
+      new THREE.Vector3(0.05, 1.2, 0), new THREE.Vector3(0.7, 1.45, 0),
+    ]);
+    const whistleSilver = C(0xd5dde8);
+    const WHISTLE_BOTTOM = -1.4;
+    const whistle = buildModel([
+      { share: 0.50, color: whistleSilver, m: CHROME, geo: new THREE.CylinderGeometry(0.8, 0.8, 0.7, 64).rotateX(Math.PI / 2).translate(0, -0.6, 0) },
+      { share: 0.28, color: whistleSilver, m: { ...CHROME, side: THREE.DoubleSide }, geo: transformed(new THREE.TubeGeometry(mouthCurve, 80, 0.24, 24, false), { scale: [1, 1, 1.3] }) },
+      { share: 0.07, color: C(0x15181d), m: MATTE, geo: new THREE.BoxGeometry(0.4, 0.06, 0.5).translate(-0.15, 0.2, 0) }, // sound slot
+      { share: 0.05, color: C(0xe0a800), m: BRASS, geo: new THREE.TorusGeometry(0.18, 0.04, 12, 32).translate(0.95, -0.95, 0) }, // ring
+      { share: 0.10, color: C(0xd92b2b), m: MATTE, geo: new THREE.TubeGeometry(new THREE.CatmullRomCurve3([ // lanyard trailing on the ground
+        new THREE.Vector3(1.05, -1.1, 0), new THREE.Vector3(1.3, -1.32, 0.1), new THREE.Vector3(1.7, -1.36, 0), new THREE.Vector3(2.1, -1.36, -0.15),
+      ]), 60, 0.04, 8, false) },
+    ]);
+
+    // sound-wave arcs fanning out from the slot
+    const soundArcs = Array.from({ length: 3 }, () => {
+      const pts = [];
+      for (let i = 0; i < 260; i++) {
+        const a = THREE.MathUtils.degToRad(-15 + rand() * 110);
+        const r = 1 + (rand() - 0.5) * 0.06;
+        pts.push(Math.cos(a) * r, Math.sin(a) * r, (rand() - 0.5) * 0.3);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute('position', new THREE.Float32BufferAttribute(pts, 3));
+      const arc = new THREE.Points(g, new THREE.PointsMaterial({ size: 0.07, map: dotTex, color: 0xffffff, transparent: true, depthWrite: false }));
+      arc.position.set(-0.15, 0.3, 0);
+      return arc;
+    });
+    const soundGroup = new THREE.Group();
+    soundGroup.visible = false;
+    soundArcs.forEach((a) => soundGroup.add(a));
+    stage.add(soundGroup);
+
+    // ---------- 7 → walking stick: top bar = handle, diagonal = shaft ----------
+    const CANE_BOTTOM = -1.42;
+    const cane = buildModel([
+      { share: 0.25, color: C(0x6e4320), m: WOOD, geo: rod([-0.7, 1.4, 0], [0.55, 1.4, 0], 0.11) },  // handle
+      { share: 0.05, color: C(0xd4a017), m: BRASS, geo: new THREE.SphereGeometry(0.13, 24, 16).translate(-0.75, 1.4, 0) }, // brass knob
+      { share: 0.05, color: C(0xd4a017), m: BRASS, geo: rod([0.48, 1.32, 0], [0.48, 1.1, 0], 0.1) },  // brass collar
+      { share: 0.58, color: C(0x8f5a2a), m: WOOD, geo: rod([0.5, 1.35, 0], [-0.22, -1.25, 0], 0.08) },  // wooden shaft
+      { share: 0.07, color: C(0x1c1c1c), m: MATTE, geo: rod([-0.22, -1.25, 0], [-0.25, CANE_BOTTOM, 0], 0.09) }, // rubber tip
+      { color: C(0x6e4320), m: WOOD, geo: new THREE.SphereGeometry(0.11, 16, 12).translate(0.55, 1.4, 0) }, // rounded handle end
+    ]);
+
+    // ---------- 8 → snowman: bottom loop = body, top loop = head ----------
+    const snowWhite = C(0xf4f8ff);
+    const coal = C(0x111111);
+    const SNOWMAN_BOTTOM = -0.65 - 0.92 - 0.1 + 0.12; // sunk a little into the snow
+    const snowman = buildModel([
+      { share: 0.40, color: snowWhite, m: MATTE, geo: new THREE.SphereGeometry(0.92, 48, 32).translate(0, -0.65, 0) },
+      { share: 0.24, color: snowWhite, m: MATTE, geo: new THREE.SphereGeometry(0.62, 48, 32).translate(0, 0.78, 0) },
+      // top hat + red band
+      { share: 0.08, color: C(0x1b1b1f), m: MATTE, geos: [
+        new THREE.CylinderGeometry(0.38, 0.38, 0.5, 32).translate(0, 1.62, 0),
+        new THREE.CylinderGeometry(0.6, 0.6, 0.05, 32).translate(0, 1.35, 0),
+      ] },
+      { share: 0.02, color: C(0xd92b2b), m: MATTE, geo: new THREE.CylinderGeometry(0.39, 0.39, 0.1, 32, 1, true).translate(0, 1.44, 0) },
+      // carrot nose (points at the camera), coal eyes, coal smile
+      { share: 0.03, color: C(0xff7a14), geo: new THREE.ConeGeometry(0.08, 0.45, 16).rotateX(Math.PI / 2).translate(0, 0.78, 0.82) },
+      { share: 0.02, color: coal, geos: [0.18, -0.18].map((x) => new THREE.SphereGeometry(0.06, 12, 8).translate(x, 0.95, 0.56)) },
+      { share: 0.02, color: coal, geos: [-0.24, -0.12, 0, 0.12, 0.24].map((x) => new THREE.SphereGeometry(0.04, 10, 8).translate(x, 0.55 + Math.abs(x) * 0.5, 0.55)) },
+      // scarf + coal buttons
+      { share: 0.06, color: C(0xd92b2b), m: MATTE, geos: [
+        new THREE.TorusGeometry(0.5, 0.1, 12, 40).rotateX(Math.PI / 2).translate(0, 0.25, 0),
+        rod([0.25, 0.22, 0.45], [0.35, -0.3, 0.6], 0.08),
+      ] },
+      { share: 0.03, color: coal, geos: [-0.2, -0.55, -0.9].map((y) => new THREE.SphereGeometry(0.07, 12, 8).translate(0, y, 0.9 - Math.abs(y + 0.55) * 0.35)) },
+      // stick arms with twig fingers: left is still, right waves
+      { share: 0.05, color: C(0x5c3a1c), m: MATTE, geos: [
+        rod([-0.8, -0.05, 0], [-1.6, 0.5, 0], 0.04), rod([-1.45, 0.4, 0], [-1.7, 0.4, 0], 0.025), rod([-1.5, 0.43, 0], [-1.6, 0.7, 0], 0.025),
+      ] },
+      { share: 0.05, color: C(0x5c3a1c), m: MATTE, name: 'armR', geos: [
+        rod([0.8, -0.05, 0], [1.55, 0.75, 0], 0.04), rod([1.42, 0.6, 0], [1.7, 0.66, 0], 0.025), rod([1.46, 0.65, 0], [1.45, 0.95, 0], 0.025),
+      ] },
+    ], -0.1);
+    setPivot(snowman.named.armR, 0.8, -0.05, 0);
+
+    // falling snow
+    const FLAKES = 900;
+    const flakePos = new Float32Array(FLAKES * 3);
+    for (let i = 0; i < FLAKES; i++) flakePos.set([(rand() - 0.5) * 16, GROUND_Y + rand() * 8, -5 + rand() * 9], i * 3);
+    const flakeGeo = new THREE.BufferGeometry();
+    flakeGeo.setAttribute('position', new THREE.BufferAttribute(flakePos, 3));
+    const snowfall = new THREE.Points(flakeGeo, new THREE.PointsMaterial({ size: 0.09, map: dotTex, color: 0xffffff, transparent: true, depthWrite: false }));
+    snowfall.visible = false;
+    snowfall.frustumCulled = false;
+    scene.add(snowfall);
+    function updateSnow(dt, time) {
+      for (let i = 0; i < FLAKES; i++) {
+        const k = i * 3;
+        flakePos[k + 1] -= dt * (0.5 + (i % 7) * 0.09);
+        flakePos[k] += Math.sin(time + i) * dt * 0.15;
+        if (flakePos[k + 1] < GROUND_Y) flakePos[k + 1] = GROUND_Y + 8;
+      }
+      flakeGeo.attributes.position.needsUpdate = true;
+    }
+
+    // ---------- 9 → lollipop: loop = swirly candy, stem = stick ----------
+    const LOLLI_BOTTOM = -1.45;
+    const swirlHex = ['#ff3d94', '#ffffff', '#ffd21f', '#2fb4ff'];
+    const swirlColors = swirlHex.map((h) => C(h));
+    const stripeAt = (angle, r01) => Math.floor((((angle / (Math.PI * 2)) * 4 + r01 * 3.75) % 4 + 4) % 4);
+    function sampleCandy(n) {
+      // disc faces + rim, coloured in spiral stripes
+      const out = [];
+      for (let i = 0; i < n; i++) {
+        const onRim = rand() < 0.15;
+        const r = onRim ? 0.75 : 0.75 * Math.sqrt(rand());
+        const a = rand() * Math.PI * 2;
+        const z = onRim ? (rand() - 0.5) * 0.28 : (rand() < 0.5 ? 0.14 : -0.14);
+        out.push({ p: new THREE.Vector3(Math.cos(a) * r, 0.72 + Math.sin(a) * r, z), c: swirlColors[stripeAt(a, r / 0.75)] });
+      }
+      return out;
+    }
+    const swirlTex = canvasTexture(512, (g, s) => {
+      const img = g.createImageData(s, s);
+      const rgb = swirlColors.map((c) => c.clone().convertLinearToSRGB());
+      for (let y = 0; y < s; y++) {
+        for (let x = 0; x < s; x++) {
+          const dx = (x / s) * 2 - 1, dy = 1 - (y / s) * 2;
+          const a = (Math.atan2(dy, dx) + Math.PI * 2) % (Math.PI * 2);
+          const c = rgb[stripeAt(a, Math.min(1, Math.hypot(dx, dy)))];
+          img.data.set([c.r * 255, c.g * 255, c.b * 255, 255], (y * s + x) * 4);
+        }
+      }
+      g.putImageData(img, 0, 0);
+    });
+    const CANDY_N = Math.round(COUNT * 0.72);
+    const lollipop = buildModel([
+      { share: 0.85, color: C(0xf4f4f4), m: { roughness: 0.6 }, geo: rod([0.62, 0.3, 0], [0.62, LOLLI_BOTTOM, 0], 0.06) },
+      { share: 0.15, color: C(0xd92b2b), m: MATTE, geos: [ // ribbon bow on the stick
+        new THREE.SphereGeometry(0.09, 12, 8).translate(0.62, 0.0, 0),
+        new THREE.ConeGeometry(0.1, 0.22, 12).rotateZ(Math.PI / 2).translate(0.75, 0.0, 0),
+        new THREE.ConeGeometry(0.1, 0.22, 12).rotateZ(-Math.PI / 2).translate(0.49, 0.0, 0),
+      ] },
+    ], 0, COUNT - CANDY_N);
+    lollipop.points.unshift(...sampleCandy(CANDY_N));
+    {
+      const glaze = { roughness: 0.15, clearcoat: 1, clearcoatRoughness: 0.05 };
+      const face = new THREE.MeshPhysicalMaterial({ map: swirlTex, ...glaze });
+      const candy = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.75, 0.75, 0.28, 64).rotateX(Math.PI / 2).translate(0, 0.72, 0),
+        [new THREE.MeshPhysicalMaterial({ color: 0xff3d94, ...glaze }), face, face]);
+      candy.castShadow = true;
+      lollipop.group.add(candy);
+    }
+
+    // ---------- particle system: carries the digit's shape across to the object's shape ----------
+    const geometry = new THREE.BufferGeometry();
+    const attr = (name, size) => {
+      const a = new THREE.BufferAttribute(new Float32Array(COUNT * size), size);
+      geometry.setAttribute(name, a);
+      return a;
+    };
+    const aPos = attr('position', 3);
+    const aTarget = attr('aTarget', 3);
+    const aColorA = attr('aColorA', 3);
+    const aColorB = attr('aColorB', 3);
+    const aRandom = attr('aRandom', 3);
+    const aDelay = attr('aDelay', 1);
+
+    for (let i = 0; i < COUNT; i++) {
+      const dir = new THREE.Vector3().randomDirection().multiplyScalar(0.5 + rand());
+      aRandom.setXYZ(i, dir.x, dir.y, dir.z);
+    }
+
+    function loadMorph(from, to) {
+      for (let i = 0; i < COUNT; i++) {
+        const a = from[i], b = to[i];
+        aPos.setXYZ(i, a.p.x, a.p.y, a.p.z);
+        aTarget.setXYZ(i, b.p.x, b.p.y, b.p.z);
+        aColorA.setXYZ(i, a.c.r, a.c.g, a.c.b);
+        aColorB.setXYZ(i, b.c.r, b.c.g, b.c.b);
+        // delay sweeps top-to-bottom, with jitter
+        aDelay.setX(i, (1 - clamp((a.p.y + 1.6) / 3.2, 0, 1)) * 0.7 + rand() * 0.3);
+      }
+      for (const a of [aPos, aTarget, aColorA, aColorB, aDelay]) a.needsUpdate = true;
+    }
+
+    const material = new THREE.ShaderMaterial({
+      uniforms: {
+        uProgress: { value: 0 },
+        uTime: { value: 0 },
+        uSize: { value: 46 * renderer.getPixelRatio() },
+      },
+      vertexShader: /* glsl */ `
+        uniform float uProgress;
+        uniform float uTime;
+        uniform float uSize;
+        attribute vec3 aTarget;
+        attribute vec3 aColorA;
+        attribute vec3 aColorB;
+        attribute vec3 aRandom;
+        attribute float aDelay;
+        varying vec3 vColor;
+
+        const float PI = 3.14159265;
+
+        float easeInOutCubic(float t) {
+          return t < 0.5 ? 4.0 * t * t * t : 1.0 - pow(-2.0 * t + 2.0, 3.0) / 2.0;
+        }
+
+        mat2 rot(float a) { float s = sin(a), c = cos(a); return mat2(c, -s, s, c); }
+
+        void main() {
+          float t = clamp((uProgress - aDelay * 0.5) / 0.5, 0.0, 1.0);
+          t = easeInOutCubic(t);
+          float bump = sin(t * PI);
+
+          vec3 pos = mix(position, aTarget, t);
+          // burst outward and swirl around Y mid-flight
+          pos += aRandom * bump * 1.6;
+          pos.xz = rot(bump * (2.0 + aRandom.x)) * pos.xz;
+          pos += 0.01 * bump * vec3(sin(uTime * 3.0 + aRandom.y * 20.0), cos(uTime * 2.0 + aRandom.z * 20.0), 0.0);
+
+          vec4 mv = modelViewMatrix * vec4(pos, 1.0);
+          gl_Position = projectionMatrix * mv;
+          gl_PointSize = uSize * (0.75 + bump * 0.5) / -mv.z;
+
+          vColor = mix(aColorA, aColorB, t) + bump * 0.12;
+        }
+      `,
+      fragmentShader: /* glsl */ `
+        varying vec3 vColor;
+        void main() {
+          float d = length(gl_PointCoord - 0.5);
+          if (d > 0.5) discard;
+          gl_FragColor = vec4(vColor * (1.0 - d * 0.7), 1.0); // shaded like tiny beads
+          #include <tonemapping_fragment>
+          #include <colorspace_fragment>
+        }
+      `,
+    });
+
+    const particles = new THREE.Points(geometry, material);
+    particles.visible = false;
+    particles.frustumCulled = false;
+    stage.add(particles);
+
+    // ---------- game state ----------
+    const HOLD = 0.9, MORPH = 3.0, SETTLE = 0.7;
+    let current = null;   // active SHAPES entry
+    let phase = 'idle';   // idle | hold | morph | settle | done
+    let phaseTime = 0;
+    let now = 0;
+    const statusEl = document.getElementById('status');
+    const status = (text) => { statusEl.textContent = text; };
+    const again = (msg) => `${msg} Pick another number!`;
+
+    const easeOutBack = (k) => 1 + 2.7 * Math.pow(k - 1, 3) + 1.7 * Math.pow(k - 1, 2);
+    const easeInOut = (k) => k * k * (3 - 2 * k);
+    function easeOutBounce(k) {
+      const n = 7.5625, d = 2.75;
+      if (k < 1 / d) return n * k * k;
+      if (k < 2 / d) return n * (k -= 1.5 / d) * k + 0.75;
+      if (k < 2.5 / d) return n * (k -= 2.25 / d) * k + 0.9375;
+      return n * (k -= 2.625 / d) * k + 0.984375;
+    }
+
+    // someone walks in, picks the object up by its grip point, and walks off carrying it
+    let carryStage = 'approach'; // approach | grab | walk
+    let carryTime = 0;
+    const handWorld = new THREE.Vector3();
+    function startCarry(carry) {
+      carry.fig.visible = true;
+      carry.fig.userData.reachAngle = carry.reach;  // how high the carrying arm lifts
+      carry.fig.userData.carryElbow = carry.elbow; // and how much its elbow bends
+      carry.fig.position.set(-5.5, GROUND_Y, 0);
+      carryStage = 'approach';
+      carryTime = 0;
+      status(carry.intro);
+    }
+    function updateCarry(dt, carry, msg) {
+      const { fig, grip: gripPt, upright, scale: heldScale, swing } = carry;
+      carryTime += dt;
+      const grip = (s, angle) => new THREE.Vector3(gripPt.x, gripPt.y, 0)
+        .applyAxisAngle(new THREE.Vector3(0, 0, 1), angle).multiplyScalar(s);
+      if (carryStage === 'approach') {
+        fig.position.x += WALK_SPEED * dt;
+        poseWalk(fig, now, true, 0);
+        fig.updateMatrixWorld(true);
+        fig.userData.hand.getWorldPosition(handWorld);
+        if (handWorld.x >= stage.position.x + gripPt.x - 0.05) {
+          carryStage = 'grab';
+          carryTime = 0;
+          sfx.pick();
+        }
+        return;
+      }
+      const walking = carryStage === 'walk';
+      if (walking) {
+        fig.position.x += WALK_SPEED * dt;
+        if (fig.position.x > 7) fig.position.x = -7;
+      }
+      poseWalk(fig, now, walking, 1);
+      fig.updateMatrixWorld(true);
+      fig.userData.hand.getWorldPosition(handWorld);
+      // grab: blend the object from where it stood into the hand, upright and shrunk to carrying size
+      const k = walking ? 1 : THREE.MathUtils.smootherstep(carryTime / 1.2, 0, 1);
+      const s = lerp(1, heldScale, k);
+      const angle = k * (upright + (walking ? Math.sin(now * (fig.userData.stride ?? 5)) * swing : 0)); // swings with each step
+      stage.position.lerp(handWorld.clone().sub(grip(s, angle)), k);
+      stage.rotation.set(0, 0, angle);
+      stage.scale.setScalar(s);
+      if (!walking && carryTime > 1.3) {
+        carryStage = 'walk';
+        status(again(msg));
+        carry.onPicked?.();
+      }
+    }
+    santa.userData.onStep = (sign) => {
+      sfx.step(0.8); // heavy boots
+      if (current?.carry?.taps && carryStage === 'walk' && sign > 0) sfx.tap(); // the cane taps every other step
+    };
+
+    // Each digit: its solid number, the object it becomes, where that object rests (stage height once
+    // landed), and what the object does afterwards. enter() runs on landing, update() every frame after.
+    const SHAPES = {
+      1: {
+        digit: buildDigit([onePath]), model: rocket, restY: GROUND_Y - ROCKET_BOTTOM,
+        reset() { flame.visible = false; flameLight.intensity = 0; },
+        enter() { this.step = 0; this.v = 0; this.gone = false; this.rumble = null; status('Ready for launch...'); },
+        update(dt, t) {
+          const beats = [0.3, 1.1, 1.9];
+          while (this.step < 3 && t >= beats[this.step]) {
+            sfx.beep();
+            status(`${3 - this.step}...`);
+            this.step++;
+          }
+          if (this.step === 3 && t >= 2.7) { // ignition
+            this.step = 4;
+            flame.visible = true;
+            sfx.ignite();
+            this.rumble = loops.rumble();
+            this.rumble.set(0.7, 0.5);
+            status('Ignition! 🔥');
+          }
+          if (this.step < 4 || this.gone) return;
+          flame.scale.set(0.85 + rand() * 0.3, 0.8 + rand() * 0.5, 0.85 + rand() * 0.3);
+          flameLight.intensity = 25 + rand() * 15;
+          stage.position.x = (rand() - 0.5) * 0.05; // engine shake
+          emitSmoke(stage.position.x, stage.position.y + ROCKET_BOTTOM - 0.3, 5);
+          if (t >= 3.5) { // liftoff: slow at first, then faster and faster
+            if (this.step === 4) { this.step = 5; status('Liftoff! 🚀'); }
+            this.v += dt * (2.5 + this.v * 0.9);
+            stage.position.y += this.v * dt;
+            this.rumble.set(Math.max(0.12, 0.7 - stage.position.y * 0.035), 0.3);
+          }
+          if (stage.position.y > 18) {
+            this.gone = true;
+            rocket.group.visible = false;
+            this.reset();
+            this.rumble.stop(2.5);
+            status(again('To the moon! 🌕'));
+          }
+        },
+        lookY: () => clamp(stage.position.y * 0.5, -0.4, 6), // camera tilts up to follow
+      },
+      2: {
+        digit: buildDigit([twoPath]), model: duck, restY: GROUND_Y + 0.9 + 0.35,
+        enter() { this.quacks = -1; status(again('Quack! 🦆')); },
+        update(dt, t) {
+          // every couple of seconds: two quacks, each with a little hop and a wing flap
+          const CYCLE = 2.6, c = t % CYCLE, hopping = t > 0.4 && c < 0.5;
+          const cycle = Math.floor(t / CYCLE);
+          if (t > 0.4 && cycle !== this.quacks) {
+            this.quacks = cycle;
+            sfx.quack(0);
+            sfx.quack(0.25);
+          }
+          const beat = hopping ? Math.abs(Math.sin((c / 0.25) * Math.PI)) : 0;
+          stage.position.y = this.restY + beat * 0.12;
+          duck.named.wingR.rotation.x = -beat * 0.7;
+          duck.named.wingL.rotation.x = beat * 0.7;
+          duck.named.head.rotation.z = Math.sin(t * 1.3) * 0.05 + beat * 0.12;
+          stage.rotation.y = -0.25 + Math.sin(t * 0.5) * 0.35; // waddles round to look about
+          stage.rotation.z = Math.sin(t * 3) * 0.02;
+        },
+      },
+      3: {
+        digit: buildDigit([threePath]), model: slide, restY: GROUND_Y - (SLIDE_GROUND + SLIDE_OFFSET),
+        enter() {
+          // Santas already part-way down at the start stay quiet until their next turn
+          kids.forEach((k) => { k.lastWhee = k.offset % SLIDE_CYCLE >= 0.5 ? 0 : -1; });
+          kidGroup.visible = true;
+          status(again('Wheee! 🛝'));
+        },
+        update(dt, t) { updateKids(t); },
+      },
+      4: {
+        digit: buildDigit([fourPath, stemPath]), model: flag, restY: GROUND_Y + 1.6,
+        reset() { waveCloth(0, 0); },
+        enter() {
+          this.wind = loops.wind();
+          this.wind.set(0.09, 1.5);
+          this.nextFlap = 0.4;
+          status(again('Flag up! 🚩'));
+        },
+        update(dt, t) {
+          waveCloth(t, Math.min(1, t / 1.2)); // the breeze picks up
+          if (t > this.nextFlap) {
+            this.nextFlap = t + 0.22 + rand() * 0.4;
+            sfx.flap();
+          }
+        },
+      },
+      5: {
+        digit: buildDigit([fivePath]), model: crane, restY: CRANE_REST, bounce: false, lookY: () => 0.35,
+        reset() {
+          towerPivot.visible = false;
+          crane.named.hook.position.y = 0;
+          crane.named.cable.scale.y = 1;
+        },
+        enter() {
+          this.seg = -1;
+          this.motor = loops.motor();
+          towerPivot.visible = true;
+          towerPivot.scale.y = 0.001;
+          status(again('Lift it up! 🏗️'));
+        },
+        update(dt, t) {
+          towerPivot.scale.y = Math.max(0.001, 1 - Math.pow(1 - Math.min(1, t / 0.9), 3)); // tower rises
+          // lower the crate to the ground, pause, hoist it back up, pause
+          const DOWN = 2.4, WAIT = 0.9, PERIOD = (DOWN + WAIT) * 2;
+          const c = Math.max(0, t - 1.3) % PERIOD;
+          const seg = t < 1.3 ? -1 : c < DOWN ? 0 : c < DOWN + WAIT ? 1 : c < DOWN * 2 + WAIT ? 2 : 3;
+          const drop = seg === 0 ? easeInOut(c / DOWN) : seg === 1 ? 1 : seg === 2 ? 1 - easeInOut((c - DOWN - WAIT) / DOWN) : 0;
+          if (seg !== this.seg) {
+            if (seg === 1) sfx.thud();   // crate touches down
+            if (seg === 3) sfx.clank();  // hook back at the top
+            this.motor.setPitch(seg === 2 ? 76 : 58);
+            this.motor.set(seg === 0 || seg === 2 ? 0.1 : 0, 0.15);
+            this.seg = seg;
+          }
+          crane.named.hook.position.y = -drop * CRANE_MAX_DROP;
+          crane.named.cable.scale.y = (CABLE_LEN + drop * CRANE_MAX_DROP) / CABLE_LEN;
+        },
+      },
+      6: {
+        digit: buildDigit([sixPath]), model: whistle, restY: GROUND_Y - WHISTLE_BOTTOM,
+        enter() { this.blows = -1; soundGroup.visible = true; status(again('TWEEEET! 📯')); },
+        update(dt, t) {
+          // blow for 1.2s, rest 1s, repeat: the whistle shakes and sound waves fan out
+          const BLOW = 1.2, CYCLE = 2.2, c = t % CYCLE, blowing = c < BLOW;
+          const blow = Math.floor(t / CYCLE);
+          if (blow !== this.blows) {
+            this.blows = blow;
+            sfx.whistle(BLOW);
+          }
+          stage.position.x = blowing ? (rand() - 0.5) * 0.04 : 0;
+          stage.position.y = this.restY + (blowing ? rand() * 0.03 : 0);
+          stage.rotation.z = blowing ? Math.sin(now * 60) * 0.012 : 0;
+          soundArcs.forEach((arc, i) => {
+            const s = blowing ? ((c / BLOW) * 2 + i / soundArcs.length) % 1 : 1;
+            arc.scale.setScalar(0.4 + s * 1.6);
+            arc.material.opacity = blowing ? (1 - s) * 0.9 : 0;
+          });
+        },
+      },
+      7: {
+        digit: buildDigit([sevenPath]), model: cane, restY: GROUND_Y - CANE_BOTTOM,
+        carry: { fig: santa, reach: 0.15, elbow: 0.35, taps: true, grip: new THREE.Vector2(0.3, 1.4), upright: 0.27, scale: 0.43, swing: 0.12, intro: 'A walking stick... who needs it? 🦯', onPicked: () => sfx.hoho() },
+        enter() { startCarry(this.carry); },
+        update(dt) { updateCarry(dt, this.carry, 'Ho ho ho! Off for a stroll! 🎅'); },
+      },
+      8: {
+        digit: buildDigit([eightPath]), model: snowman, restY: GROUND_Y - SNOWMAN_BOTTOM,
+        reveal() { envTarget = ENV.snow; }, // winter arrives as he forms
+        enter() {
+          snowfall.visible = true;
+          this.wind = loops.wind();
+          this.wind.set(0.05, 2);
+          this.nextJingle = 0.2;
+          status(again('Hello there! ☃️'));
+        },
+        update(dt, t) {
+          snowman.named.armR.rotation.z = 0.15 + Math.sin(t * 7) * 0.4; // waving hello
+          stage.rotation.z = Math.sin(t * 1.2) * 0.015;
+          updateSnow(dt, now);
+          if (t > this.nextJingle) {
+            this.nextJingle = t + 4.5;
+            sfx.jingle();
+          }
+        },
+      },
+      9: {
+        digit: buildDigit([ninePath]), model: lollipop, restY: GROUND_Y - LOLLI_BOTTOM,
+        carry: { fig: santa, reach: 0.9, elbow: 0.9, grip: new THREE.Vector2(0.62, -0.9), upright: 0, scale: 0.4, swing: 0.05, intro: 'Ooh, a lollipop! 🍭', onPicked: () => { sfx.yum(); sfx.hoho(0.5); } },
+        enter() { startCarry(this.carry); },
+        update(dt) { updateCarry(dt, this.carry, 'Ho ho ho! Yummy! 🍭'); },
+      },
+    };
+    for (const s of Object.values(SHAPES)) {
+      // Sort by height so particles travel coherently (top of digit -> top of model)
+      s.digit.points.sort((a, b) => b.p.y - a.p.y);
+      s.model.points.sort((a, b) => b.p.y - a.p.y);
+      stage.add(s.digit.group, s.model.group);
+    }
+
+    function clearStage() {
+      stopLoops();
+      for (const s of Object.values(SHAPES)) {
+        s.digit.group.visible = false;
+        s.model.group.visible = false;
+        s.reset?.();
+      }
+      for (const o of [particles, kidGroup, soundGroup, santa, snowfall]) o.visible = false;
+      stage.position.set(0, 0, 0);
+      stage.rotation.set(0, 0, 0);
+      stage.scale.setScalar(1);
+      envTarget = ENV.day;
+    }
+
+    function start(digit) {
+      clearStage();
+      current = SHAPES[digit];
+      loadMorph(current.digit.points, current.model.points);
+      material.uniforms.uProgress.value = 0;
+      current.digit.group.visible = true;
+      current.digit.group.scale.setScalar(0.6);
+      phase = 'hold';
+      phaseTime = 0;
+      sfx.chime();
+      status(`Nice ${digit}! ✨`);
+    }
+
+    // ---------- connect-the-dots: dots are laid along each digit's strokes, projected to the screen ----------
+    const DIGIT_STROKES = {
+      1: [onePath], 2: [twoPath], 3: [threePath], 4: [fourPath, stemPath],
+      5: [fivePath], 6: [sixPath], 7: [sevenPath], 8: [eightPath], 9: [ninePath],
+    };
+    const DOT_SPACING = 0.45; // model units between dots
+    const HIT_RADIUS = 34;    // px: how close the pen must pass to collect a dot
+
+    const drawCanvas = document.getElementById('draw');
+    const ctx = drawCanvas.getContext('2d');
+    function sizeDrawCanvas() {
+      drawCanvas.width = window.innerWidth;
+      drawCanvas.height = window.innerHeight;
+      smokeMat.uniforms.uScale.value = window.innerHeight * renderer.getPixelRatio() * 1.207; // world units -> px at 45° fov
+    }
+    sizeDrawCanvas();
+
+    let activeDigit = null;
+    let dots = [];    // { x, y, hit }
+    let strokes = [];
+    let stroke = null;
+
+    function toScreen(p) {
+      const v = p.clone().project(camera);
+      return { x: ((v.x + 1) / 2) * drawCanvas.width, y: ((1 - v.y) / 2) * drawCanvas.height };
+    }
+
+    function layoutDots() {
+      camera.updateMatrixWorld();
+      const all = DIGIT_STROKES[activeDigit].flatMap((curve) => {
+        const count = Math.max(2, Math.round(curve.getLength() / DOT_SPACING));
+        return curve.getSpacedPoints(count).map((p) => ({ ...toScreen(p), hit: false }));
+      });
+      // closed loops (8) end where they start: drop dots sitting on an earlier one
+      dots = all.filter((d, i) => !all.slice(0, i).some((o) => Math.hypot(o.x - d.x, o.y - d.y) < 14));
+    }
+
+    function renderDrawing() {
+      ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+      // the kid's lines
+      ctx.save();
+      ctx.strokeStyle = '#ff3d7f';
+      ctx.lineWidth = 10;
+      ctx.lineCap = ctx.lineJoin = 'round';
+      ctx.shadowColor = 'rgba(0, 0, 0, 0.3)';
+      ctx.shadowBlur = 6;
+      for (const s of [...strokes, ...(stroke ? [stroke] : [])]) {
+        ctx.beginPath();
+        s.forEach((p, i) => (i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y)));
+        ctx.stroke();
+      }
+      ctx.restore();
+      // the dots, with the next one to reach highlighted
+      const next = dots.find((d) => !d.hit);
+      ctx.strokeStyle = '#0b0f1a';
+      ctx.lineWidth = 2.5;
+      for (const d of dots) {
+        const isNext = d === next;
+        ctx.beginPath();
+        ctx.arc(d.x, d.y, isNext ? 11 : 8, 0, Math.PI * 2);
+        ctx.fillStyle = d.hit ? '#35c46a' : isNext ? '#ffd23f' : '#ffffff';
+        ctx.fill();
+        ctx.stroke();
+      }
+    }
+
+    function collectDots(p) {
+      for (const d of dots) {
+        if (!d.hit && Math.hypot(d.x - p.x, d.y - p.y) < HIT_RADIUS) {
+          d.hit = true;
+          sfx.pop(dots.filter((o) => o.hit).length);
+        }
+      }
+    }
+
+    const busy = () => phase === 'hold' || phase === 'morph' || phase === 'settle';
+
+    function selectDigit(digit) {
+      if (busy()) return;
+      clearStage();
+      current = null;
+      phase = 'idle';
+      homeCamera(); // dots are projected through the camera, so it must be back at its home view
+      activeDigit = digit;
+      strokes = [];
+      stroke = null;
+      layoutDots();
+      renderDrawing();
+      document.querySelectorAll('#picker button').forEach((b) => b.classList.toggle('active', +b.dataset.digit === digit));
+      sfx.click();
+      status(`Join all the dots to make a ${digit}! ✏️`);
+    }
+
+    drawCanvas.addEventListener('pointerdown', (e) => {
+      if (!activeDigit || busy()) return;
+      stroke = [{ x: e.clientX, y: e.clientY }];
+      collectDots(stroke[0]);
+      renderDrawing();
+      drawCanvas.setPointerCapture(e.pointerId);
+      if (dots.every((d) => d.hit)) finishDots();
+    });
+    drawCanvas.addEventListener('pointermove', (e) => {
+      if (!stroke) return;
+      // fill gaps between fast pointer samples so quick strokes still pass over dots
+      const last = stroke[stroke.length - 1];
+      const p = { x: e.clientX, y: e.clientY };
+      const steps = Math.ceil(Math.hypot(p.x - last.x, p.y - last.y) / 10);
+      for (let i = 1; i <= steps; i++) collectDots({ x: last.x + ((p.x - last.x) * i) / steps, y: last.y + ((p.y - last.y) * i) / steps });
+      stroke.push(p);
+      renderDrawing();
+      if (dots.every((d) => d.hit)) finishDots();
+    });
+    drawCanvas.addEventListener('pointerup', () => {
+      if (!stroke) return;
+      strokes.push(stroke);
+      stroke = null;
+      renderDrawing();
+    });
+
+    function finishDots() {
+      const digit = activeDigit;
+      activeDigit = null;
+      stroke = null;
+      document.querySelectorAll('#picker button').forEach((b) => b.classList.remove('active'));
+      setTimeout(() => {
+        ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
+        dots = [];
+        strokes = [];
+        start(digit);
+      }, 350);
+    }
+
+    document.querySelectorAll('#picker button').forEach((b) => {
+      b.addEventListener('click', () => selectDigit(+b.dataset.digit));
+    });
+
+    window.addEventListener('resize', () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+      sizeDrawCanvas();
+      if (activeDigit) { layoutDots(); renderDrawing(); }
+    });
+
+    // ---------- loop ----------
+    function updateCamera(dt) {
+      // while an object is doing its thing the camera drifts gently around it; otherwise it stays home
+      const done = phase === 'done';
+      const sway = done ? Math.sin(phaseTime * 0.25) * 0.2 : 0;
+      const targetY = done ? (current.lookY?.() ?? -0.4) : 0;
+      camLookY = done ? camLookY + (targetY - camLookY) * Math.min(1, dt * 2) : 0;
+      camera.position.set(Math.sin(CAM_A + sway) * CAM_R, CAM_Y, Math.cos(CAM_A + sway) * CAM_R);
+      camera.lookAt(0, camLookY, 0);
+    }
+
+    function updateWorld(dt) {
+      const k = 1 - Math.exp(-dt * 2.5);
+      skyMat.uniforms.uTop.value.lerp(envTarget.top, k);
+      skyMat.uniforms.uBottom.value.lerp(envTarget.bottom, k);
+      groundMat.color.lerp(envTarget.ground, k);
+      scene.fog.color.copy(skyMat.uniforms.uBottom.value);
+      for (const cloud of clouds) {
+        cloud.position.x += dt * 0.25;
+        if (cloud.position.x > 55) cloud.position.x = -55;
+      }
+      updateSmoke(dt);
+    }
+
+    const clock = new THREE.Clock();
+    function animate() {
+      requestAnimationFrame(animate);
+      const dt = Math.min(clock.getDelta(), 0.05);
+      now = material.uniforms.uTime.value += dt;
+      phaseTime += dt;
+
+      if (phase === 'hold') {
+        // the finished number pops in as a solid, then breaks into particles
+        current.digit.group.scale.setScalar(lerp(0.6, 1, easeOutBack(Math.min(1, phaseTime / 0.35))));
+        if (phaseTime > HOLD) {
+          current.digit.group.visible = false;
+          particles.visible = true;
+          phase = 'morph';
+          phaseTime = 0;
+          sfx.whoosh();
+          status('Transforming...');
+        }
+      } else if (phase === 'morph') {
+        const u = material.uniforms.uProgress;
+        u.value = Math.min(1, u.value + dt / MORPH);
+        if (u.value === 1) {
+          // particles have arrived: swap them for the solid object and let it settle onto the ground
+          particles.visible = false;
+          current.model.group.visible = true;
+          current.reveal?.();
+          current.landed = false;
+          phase = 'settle';
+          phaseTime = 0;
+        }
+      } else if (phase === 'settle') {
+        const k = Math.min(1, phaseTime / SETTLE);
+        const bounce = current.bounce !== false;
+        stage.position.y = current.restY * (bounce ? easeOutBounce(k) : easeInOut(k));
+        if (bounce && !current.landed && k > 0.36) {
+          current.landed = true;
+          sfx.thud();
+        }
+        if (k === 1) {
+          phase = 'done';
+          phaseTime = 0;
+          current.enter();
+        }
+      } else if (phase === 'done') {
+        current.update(dt, phaseTime);
+      }
+
+      updateWorld(dt);
+      updateCamera(dt);
+      renderer.render(scene, camera);
+    }
+    animate();
+  </script>
+</body>
+</html>
