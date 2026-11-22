@@ -1498,7 +1498,7 @@
       kit.add(phone, stick);
       kit.visible = false;
       scene.add(kit);
-      const cam = new THREE.PerspectiveCamera(80, 1, 0.1, 200);
+      const cam = new THREE.PerspectiveCamera(55, 1, 0.1, 200);
       const photoEl = document.getElementById('photo');
       return { kit, phone, stick, cam, photoEl, photoCtx: photoEl.querySelector('canvas').getContext('2d'), flashEl: document.getElementById('flash') };
     })();
@@ -2190,7 +2190,7 @@
               status(`Say cheese! ${3 - n}...`);
             }
             if (this.modeT >= 2.4) {
-              this.snap(phonePos, subject);
+              this.snap(phonePos);
               this.next('pose');
             }
             return;
@@ -2201,14 +2201,20 @@
             this.next('countdown');
           }
         },
-        snap(phonePos, subject) {
+        snap(phonePos) {
           // render what the phone sees, straight into the photo
           const cam = selfie.cam, w = renderer.domElement.width, h = renderer.domElement.height;
           cam.aspect = w / h;
           cam.updateProjectionMatrix();
-          cam.position.copy(phonePos);
-          cam.lookAt(subject);
+          // frame the shot so all of Santa and all of the snowman (hat to base, both arms) are in it:
+          // look from the phone's side, backing off just far enough for both to fit the square photo
           selfie.kit.visible = false;
+          const box = new THREE.Box3().setFromObject(santa).union(new THREE.Box3().setFromObject(snowman.group));
+          const sphere = box.getBoundingSphere(new THREE.Sphere()), centre = sphere.center;
+          const fit = sphere.radius / Math.sin(THREE.MathUtils.degToRad(cam.fov / 2)); // fits from any viewing angle
+          const from = phonePos.clone().sub(centre).normalize();
+          cam.position.copy(centre).addScaledVector(from, Math.max(fit, phonePos.distanceTo(centre)));
+          cam.lookAt(centre);
           renderer.render(scene, cam);
           const side = Math.min(w, h);
           selfie.photoCtx.drawImage(renderer.domElement, (w - side) / 2, (h - side) / 2, side, side, 0, 0, 360, 360);
