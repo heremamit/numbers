@@ -407,6 +407,7 @@
     const muteBtn = document.getElementById('mute');
     muteBtn.addEventListener('click', () => {
       audio.muted = !audio.muted;
+      if (audio.muted) window.speechSynthesis?.cancel();
       muteBtn.textContent = audio.muted ? '🔇' : '🔊';
       if (audio.master) audio.master.gain.value = audio.muted ? 0 : 0.9;
     });
@@ -1829,6 +1830,35 @@
 
     const busy = () => phase === 'hold' || phase === 'morph' || phase === 'settle';
 
+    // ---------- spoken hint when a number is picked (browser text-to-speech) ----------
+    const KID_NAME = 'Advik';
+    const LOOKS_LIKE = {
+      1: 'a rocket', 2: 'a duck', 3: 'a slide', 4: 'a flag', 5: 'a crane hook',
+      6: 'a whistle', 7: 'a walking stick', 8: 'a snowman', 9: 'a lollipop',
+    };
+    let voice = null;
+    function pickVoice() {
+      const voices = window.speechSynthesis?.getVoices() ?? [];
+      // prefer a clear English voice; Google / Samantha / Karen sound the friendliest
+      voice = voices.find((v) => /^en/i.test(v.lang) && /google|samantha|karen|female/i.test(v.name))
+        ?? voices.find((v) => /^en/i.test(v.lang)) ?? null;
+    }
+    if (window.speechSynthesis) {
+      pickVoice();
+      window.speechSynthesis.addEventListener?.('voiceschanged', pickVoice);
+    }
+    function say(text) {
+      if (audio.muted || !window.speechSynthesis) return;
+      try {
+        window.speechSynthesis.cancel(); // a new pick interrupts the last sentence
+        const u = new SpeechSynthesisUtterance(text);
+        if (voice) u.voice = voice;
+        u.rate = 0.95;
+        u.pitch = 1.15;
+        window.speechSynthesis.speak(u);
+      } catch (e) { console.warn('[speech]', e); }
+    }
+
     function selectDigit(digit) {
       if (busy()) return;
       clearStage();
@@ -1842,6 +1872,7 @@
       renderDrawing();
       document.querySelectorAll('#picker button').forEach((b) => b.classList.toggle('active', +b.dataset.digit === digit));
       sfx.click();
+      say(`${KID_NAME}, you are drawing ${digit}. It looks like ${LOOKS_LIKE[digit]}!`);
       status(`Join all the dots to make a ${digit}! ✏️`);
     }
 
