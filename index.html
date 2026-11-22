@@ -1218,45 +1218,109 @@
       clothGeo.computeVertexNormals();
     }
 
-    // ---------- 5 → tower crane: top bar = jib, stem = cable, belly = hook carrying a crate ----------
-    const CRANE_OFFSET = -0.15, CRANE_REST = 1.1; // the whole thing hoists up so the crate has room to travel
+    // ---------- 5 → tower crane loading gifts onto Santa's cart: top bar = jib, stem = cable, belly = hook ----------
+    const CRANE_OFFSET = -0.15, CRANE_REST = 1.1; // the whole thing hoists up so the gifts have room to travel
     const CABLE_TOP = 1.3, CABLE_LEN = 1.05;
-    const CRATE_BOTTOM = -1.88 - 0.275 + CRANE_OFFSET;
-    const CRANE_MAX_DROP = CRATE_BOTTOM + CRANE_REST - GROUND_Y - 0.01;
+    const GIFT = { w: 0.6, h: 0.5, d: 0.5, y: -1.88 };              // the gift hanging under the hook (model space)
+    const GIFT_BOTTOM0 = GIFT.y - GIFT.h / 2 + CRANE_OFFSET + CRANE_REST; // world height of its base with the hook at rest
     const craneYellow = C(0xffb300);
     const jibParts = [rod([-1.3, 1.55, 0], [1.5, 1.55, 0], 0.04), rod([-1.3, 1.3, 0], [1.5, 1.3, 0], 0.04)];
     for (let x = -1.3; x < 1.5; x += 0.35) {
       jibParts.push(rod([x, 1.3, 0], [x + 0.175, 1.55, 0], 0.025), rod([x + 0.175, 1.55, 0], [x + 0.35, 1.3, 0], 0.025));
     }
     const hookTip = bellyPts[bellyPts.length - 1];
-    const crateTex = canvasTexture(256, (g, s) => {
-      g.fillStyle = '#c98a4b';
-      g.fillRect(0, 0, s, s);
-      for (let i = 0; i < 5; i++) { // planks with grain
-        g.fillStyle = i % 2 ? '#c2823f' : '#d39858';
-        g.fillRect(0, (i * s) / 5, s, s / 5 - 3);
-        g.strokeStyle = 'rgba(90,50,20,0.25)';
-        for (let k = 0; k < 6; k++) {
-          g.beginPath();
-          g.moveTo(0, (i * s) / 5 + rand() * (s / 5));
-          g.lineTo(s, (i * s) / 5 + rand() * (s / 5));
-          g.stroke();
-        }
-      }
-      g.strokeStyle = '#7a4a22';
-      g.lineWidth = 18;
-      g.strokeRect(9, 9, s - 18, s - 18); // frame
-    });
+
+    // wrapped presents: paper box, two ribbon bands and a bow on top
+    const GIFT_COLORS = [[0xd61f2c, 0xf2c230], [0x1f9e55, 0xd61f2c], [0x2a6fd6, 0xf4f4f4]];
+    const ribbonMat = (hex) => new THREE.MeshPhysicalMaterial({ color: hex, roughness: 0.3, sheen: 1, sheenColor: C(0xffffff), sheenRoughness: 0.3 });
+    function giftDecorGeos({ w, h, d }, y = 0) {
+      const top = y + h / 2;
+      return [
+        new THREE.BoxGeometry(w + 0.012, h + 0.012, 0.07).translate(0, y, 0),
+        new THREE.BoxGeometry(0.07, h + 0.012, d + 0.012).translate(0, y, 0),
+        new THREE.TorusGeometry(0.075, 0.022, 8, 20).rotateY(Math.PI / 2).rotateZ(0.6).translate(-0.06, top + 0.06, 0),
+        new THREE.TorusGeometry(0.075, 0.022, 8, 20).rotateY(Math.PI / 2).rotateZ(-0.6).translate(0.06, top + 0.06, 0),
+        new THREE.SphereGeometry(0.035, 12, 8).translate(0, top + 0.02, 0),
+      ];
+    }
+    function makeGift([paper, ribbon]) {
+      const g = new THREE.Group();
+      const box = new THREE.Mesh(new THREE.BoxGeometry(GIFT.w, GIFT.h, GIFT.d), new THREE.MeshStandardMaterial({ color: paper, roughness: 0.55 }));
+      g.add(box);
+      const rm = ribbonMat(ribbon);
+      for (const geo of giftDecorGeos(GIFT)) g.add(new THREE.Mesh(geo, rm));
+      g.traverse((o) => { if (o.isMesh) o.castShadow = o.receiveShadow = true; });
+      return g;
+    }
+    const hookPaper = new THREE.MeshStandardMaterial({ color: GIFT_COLORS[0][0], roughness: 0.55 });
+    const hookRibbon = ribbonMat(GIFT_COLORS[0][1]);
     const crane = buildModel([
       { share: 0.30, color: craneYellow, m: PAINTED, geos: jibParts },
-      { share: 0.06, color: C(0x555b66), m: PAINTED, geo: new THREE.BoxGeometry(0.35, 0.22, 0.3).translate(-0.66, 1.3, 0) }, // trolley
+      { share: 0.06, color: C(0x555b66), m: PAINTED, name: 'trolley', geo: new THREE.BoxGeometry(0.35, 0.22, 0.3).translate(-0.66, 1.3, 0) },
       { share: 0.08, color: C(0x70777f), m: STEEL, name: 'cable', geo: rod([-0.66, CABLE_TOP, 0], [-0.68, CABLE_TOP - CABLE_LEN, 0], 0.025) },
       { share: 0.30, color: C(0xb9c1cc), m: STEEL, name: 'hook', geo: new THREE.TubeGeometry(bellyCurve, 160, 0.13, 16, false) },
       { share: 0.03, color: C(0xb9c1cc), m: STEEL, name: 'hook', geos: [new THREE.SphereGeometry(0.13, 16, 12).translate(hookTip.x, hookTip.y, 0), new THREE.SphereGeometry(0.13, 16, 12).translate(-0.68, 0.25, 0)] },
-      { share: 0.05, color: C(0x70777f), m: STEEL, name: 'hook', geos: [rod([0, -1.3, 0], [-0.4, -1.6, 0], 0.02), rod([0, -1.3, 0], [0.4, -1.6, 0], 0.02)] }, // slings
-      { share: 0.18, color: C(0xc98a4b), name: 'hook', material: new THREE.MeshStandardMaterial({ map: crateTex, roughness: 0.8 }), geo: new THREE.BoxGeometry(0.85, 0.55, 0.55).translate(0, -1.88, 0) },
+      { share: 0.05, color: C(0x70777f), m: STEEL, name: 'hook', geos: [-1, 1].map((sx) => rod([0, -1.3, 0], [sx * 0.24, GIFT.y + GIFT.h / 2, 0], 0.02)) }, // slings
+      { share: 0.18, color: C(GIFT_COLORS[0][0]), name: 'gift', material: hookPaper, geo: new THREE.BoxGeometry(GIFT.w, GIFT.h, GIFT.d).translate(0, GIFT.y, 0) },
+      { color: C(GIFT_COLORS[0][1]), name: 'gift', material: hookRibbon, geos: giftDecorGeos(GIFT, GIFT.y) },
     ], CRANE_OFFSET);
     setPivot(crane.named.cable, -0.66, CABLE_TOP, 0);
+    crane.named.hook.add(crane.named.gift); // the gift travels with the hook
+
+    // gifts waiting on the ground for the crane, and Santa's cart they get loaded onto (world space)
+    const PILE_X = [-0.5, 0.25];
+    const pile = PILE_X.map((x, i) => {
+      const g = makeGift(GIFT_COLORS[i + 1]);
+      g.position.set(x, GROUND_Y + GIFT.h / 2, 0);
+      g.visible = false;
+      scene.add(g);
+      return g;
+    });
+    const CART_X = 1.7, CART_BED = 0.5; // bed top height above the ground
+    const CART_SLOTS = [[-0.35, 0], [0.35, 0], [0, 1]]; // [x on the bed, layer]
+    const HANDLE = { x: 1.3, y: 1.3 };                   // where Santa holds the handle (cart space)
+    const cart = (() => {
+      const group = new THREE.Group();
+      group.visible = false;
+      const wood = makeMat(C(0x9a5b2c), WOOD), red = makeMat(C(0xc8161d), PAINTED), iron = makeMat(C(0x3a3d42), STEEL);
+      const add = (geo, m, parent = group) => {
+        const mesh = new THREE.Mesh(geo, m);
+        mesh.castShadow = mesh.receiveShadow = true;
+        parent.add(mesh);
+        return mesh;
+      };
+      add(new THREE.BoxGeometry(1.5, 0.1, 0.85).translate(0, CART_BED - 0.05, 0), wood);
+      for (const z of [0.41, -0.41]) add(new THREE.BoxGeometry(1.5, 0.16, 0.04).translate(0, CART_BED + 0.07, z), red); // side rails
+      for (const x of [0.73, -0.73]) add(new THREE.BoxGeometry(0.04, 0.16, 0.85).translate(x, CART_BED + 0.07, 0), red);
+      for (const x of [0.5, -0.5]) add(rod([x, 0.22, 0.48], [x, 0.22, -0.48], 0.03), iron); // axles
+      const wheels = [];
+      for (const x of [0.5, -0.5]) for (const z of [0.46, -0.46]) {
+        const wheel = new THREE.Group();
+        wheel.position.set(x, 0.22, z);
+        add(new THREE.TorusGeometry(0.2, 0.035, 10, 32), red, wheel);
+        add(new THREE.CylinderGeometry(0.05, 0.05, 0.08, 16).rotateX(Math.PI / 2), iron, wheel);
+        for (let k = 0; k < 3; k++) add(new THREE.BoxGeometry(0.4, 0.025, 0.025).rotateZ((k * Math.PI) / 3), red, wheel);
+        group.add(wheel);
+        wheels.push(wheel);
+      }
+      // pull handle: two arms meeting at a T-grip
+      for (const z of [0.2, -0.2]) add(rod([0.74, CART_BED - 0.08, z], [HANDLE.x, HANDLE.y, 0], 0.025), iron);
+      add(rod([HANDLE.x, HANDLE.y, 0.18], [HANDLE.x, HANDLE.y, -0.18], 0.035), makeMat(C(0x1c1c1c), MATTE));
+      const loaded = CART_SLOTS.map(([x, layer], i) => {
+        const g = makeGift(GIFT_COLORS[i]);
+        g.position.set(x, CART_BED + GIFT.h / 2 + layer * GIFT.h, 0);
+        g.visible = false;
+        group.add(g);
+        return g;
+      });
+      scene.add(group);
+      return { group, wheels, loaded };
+    })();
+    function placeCart(x, rolled) {
+      cart.group.position.set(x, GROUND_Y, 0);
+      cart.wheels.forEach((w) => { w.rotation.z = -rolled / 0.2; });
+    }
+
     // the tower that holds the jib up: solid-only, rises out of the ground once the crane has formed.
     // Built in world coordinates, then hung in the stage so it lines up when the stage sits at CRANE_REST.
     const towerPivot = new THREE.Group();
@@ -1765,32 +1829,136 @@
         digit: buildDigit([fivePath]), model: crane, restY: CRANE_REST, bounce: false, lookY: () => 0.35,
         reset() {
           towerPivot.visible = false;
-          crane.named.hook.position.y = 0;
-          crane.named.cable.scale.y = 1;
+          this.setHook(0, 0);
+          crane.named.gift.visible = true;
+          this.paintHookGift(0);
+          cart.group.visible = false;
+          cart.loaded.forEach((g) => { g.visible = false; });
+          pile.forEach((g) => { g.visible = false; });
+        },
+        setHook(dx, h) { // dx = trolley travel along the jib, h = hook height (negative = lowered)
+          crane.named.trolley.position.x = dx;
+          crane.named.hook.position.set(dx, h, 0);
+          crane.named.cable.position.x = -0.66 + dx;
+          crane.named.cable.scale.y = (CABLE_LEN - h) / CABLE_LEN;
+        },
+        paintHookGift(i) {
+          hookPaper.color.setHex(GIFT_COLORS[i][0]);
+          hookRibbon.color.setHex(GIFT_COLORS[i][1]);
         },
         enter() {
-          this.seg = -1;
           this.motor = loops.motor();
           towerPivot.visible = true;
           towerPivot.scale.y = 0.001;
-          status(again('Lift it up! 🏗️'));
+          pile.forEach((g) => { g.visible = true; });
+          cart.group.visible = true;
+          cart.loaded.forEach((g) => { g.visible = false; });
+          resetFigure(santa);
+          santa.visible = true;
+          santa.rotation.y = -Math.PI; // pushes the empty cart in from the right
+          this.cartX = 6;
+          this.santa = 'arrive';
+          this.santaT = 0;
+          // hook heights: carried gifts travel high enough to clear the cart's stack
+          const TRAVEL = 0.45;
+          const onto = (bottomY) => bottomY - GIFT_BOTTOM0;
+          const bed = (layer) => onto(GROUND_Y + CART_BED + layer * GIFT.h);
+          const ground = onto(GROUND_Y);
+          const deliver = (slot) => [
+            { h: TRAVEL, dur: 1.0, motor: 76 },
+            { dx: CART_X + CART_SLOTS[slot][0], dur: 2.0, motor: 66 },
+            { h: bed(CART_SLOTS[slot][1]), dur: 1.3, motor: 58 },
+            { dur: 0.5, then: () => { // set it down on the cart and unhook
+              crane.named.gift.visible = false;
+              cart.loaded[slot].visible = true;
+              sfx.thud();
+              status(`Gift ${slot + 1} of 3 loaded! 🎁`);
+            } },
+            { h: TRAVEL, dur: 0.9, motor: 76 },
+          ];
+          const fetch = (i) => [
+            { dx: PILE_X[i], dur: 2.3, motor: 66 },
+            { h: ground, dur: 1.4, motor: 58 },
+            { dur: 0.5, then: () => { // hook onto the next gift on the ground
+              pile[i].visible = false;
+              this.paintHookGift(i + 1);
+              crane.named.gift.visible = true;
+              sfx.clank();
+            } },
+          ];
+          this.script = [
+            { dur: 1.4 }, // the tower rises
+            ...deliver(0), ...fetch(0), ...deliver(1), ...fetch(1), ...deliver(2),
+            { dx: 0, dur: 2.3, motor: 66 },
+            { h: 0, dur: 0.9, motor: 58, then: () => { this.santa = 'turn'; this.santaT = 0; } },
+          ];
+          this.step = 0;
+          this.stepT = 0;
+          this.at = { dx: 0, h: 0 };
+          this.setHook(0, 0);
+          this.paintHookGift(0);
+          crane.named.gift.visible = true;
+          status('Santa needs his gifts loaded! 🎅🎁');
         },
         update(dt, t) {
           towerPivot.scale.y = Math.max(0.001, 1 - Math.pow(1 - Math.min(1, t / 0.9), 3)); // tower rises
-          // lower the crate to the ground, pause, hoist it back up, pause
-          const DOWN = 2.4, WAIT = 0.9, PERIOD = (DOWN + WAIT) * 2;
-          const c = Math.max(0, t - 1.3) % PERIOD;
-          const seg = t < 1.3 ? -1 : c < DOWN ? 0 : c < DOWN + WAIT ? 1 : c < DOWN * 2 + WAIT ? 2 : 3;
-          const drop = seg === 0 ? easeInOut(c / DOWN) : seg === 1 ? 1 : seg === 2 ? 1 - easeInOut((c - DOWN - WAIT) / DOWN) : 0;
-          if (seg !== this.seg) {
-            if (seg === 1) sfx.thud();   // crate touches down
-            if (seg === 3) sfx.clank();  // hook back at the top
-            this.motor.setPitch(seg === 2 ? 76 : 58);
-            this.motor.set(seg === 0 || seg === 2 ? 0.1 : 0, 0.15);
-            this.seg = seg;
+          this.runCrane(dt);
+          this.runSanta(dt);
+        },
+        runCrane(dt) {
+          const move = this.script[this.step];
+          if (!move) return;
+          if (this.stepT === 0) {
+            this.motor.setPitch(move.motor ?? 58);
+            this.motor.set(move.motor ? 0.1 : 0, 0.15);
           }
-          crane.named.hook.position.y = -drop * CRANE_MAX_DROP;
-          crane.named.cable.scale.y = (CABLE_LEN + drop * CRANE_MAX_DROP) / CABLE_LEN;
+          this.stepT += dt;
+          const k = easeInOut(Math.min(1, this.stepT / move.dur));
+          const dx = lerp(this.at.dx, move.dx ?? this.at.dx, k), h = lerp(this.at.h, move.h ?? this.at.h, k);
+          this.setHook(dx, h);
+          if (this.stepT >= move.dur) {
+            this.at = { dx, h };
+            move.then?.();
+            this.step++;
+            this.stepT = 0;
+            if (!this.script[this.step]) this.motor.set(0, 0.2);
+          }
+        },
+        runSanta(dt) {
+          this.santaT += dt;
+          const arms = santa.userData.arms;
+          if (this.santa === 'arrive' || this.santa === 'wait') { // facing left, hands on the handle
+            if (this.santa === 'arrive') {
+              this.cartX = Math.max(CART_X, this.cartX - 1.4 * dt);
+              if (this.cartX === CART_X) this.santa = 'wait';
+            }
+            poseWalk(santa, now, this.santa === 'arrive', 0);
+            arms.forEach((a) => { a.shoulder.rotation.set(0, 0, 0.9); a.elbow.rotation.z = 0.2; });
+            placeCart(this.cartX, this.cartX);
+            santa.position.set(this.cartX + HANDLE.x + 0.7, GROUND_Y, 0);
+          } else if (this.santa === 'turn') { // all loaded: turn round to pull the cart away
+            const k = Math.min(1, this.santaT / 0.7);
+            santa.rotation.y = -Math.PI * (1 - easeInOut(k)); // turns round through facing the camera
+            santa.position.x = this.cartX + HANDLE.x + lerp(0.7, 0.6, k);
+            poseWalk(santa, now, false, 0);
+            if (k === 1) {
+              this.santa = 'leave';
+              sfx.hoho();
+              sfx.jingle();
+              status(again('All loaded! Ho ho ho! 🎅🎁'));
+            }
+          } else if (this.santa === 'leave') { // pulling the cart behind him, off to the right
+            this.cartX += 1.1 * dt;
+            poseWalk(santa, now, true, 0);
+            arms.forEach((a) => { a.shoulder.rotation.set(0, 0, -0.75); a.elbow.rotation.z = 0.1; });
+            placeCart(this.cartX, this.cartX);
+            santa.position.set(this.cartX + HANDLE.x + 0.6, GROUND_Y, 0);
+            if (this.cartX > 9) {
+              this.santa = 'gone';
+              santa.visible = false;
+              cart.group.visible = false;
+            }
+          }
         },
       },
       6: {
@@ -1970,7 +2138,7 @@
     // ---------- spoken hint when a number is picked (browser text-to-speech) ----------
     const KID_NAME = 'Advik';
     const LOOKS_LIKE = {
-      1: 'a rocket', 2: 'a slide with a long pipe', 3: 'a twisty slide', 4: 'a golf flag', 5: 'a crane hook',
+      1: 'a rocket', 2: 'a slide with a long pipe', 3: 'a twisty slide', 4: 'a golf flag', 5: 'a big crane',
       6: 'a whistle', 7: 'a walking stick', 8: 'a snowman', 9: 'a lollipop',
     };
     let voice = null;
