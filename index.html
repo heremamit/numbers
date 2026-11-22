@@ -1783,7 +1783,7 @@
 
     function renderDrawing() {
       ctx.clearRect(0, 0, drawCanvas.width, drawCanvas.height);
-      // the kid's lines
+      // the lines joining the dots touched so far (each stroke is a list of dots)
       ctx.save();
       ctx.strokeStyle = '#ff3d7f';
       ctx.lineWidth = 10;
@@ -1810,13 +1810,21 @@
       }
     }
 
-    function collectDots(p) {
-      for (const d of dots) {
-        if (!d.hit && Math.hypot(d.x - p.x, d.y - p.y) < HIT_RADIUS) {
-          d.hit = true;
-          sfx.pop(dots.filter((o) => o.hit).length);
-        }
+    // Ink only ever joins dots: the pen "touches" a dot when it comes within HIT_RADIUS of it, and
+    // the line runs dot to dot. Touching the screen anywhere else draws nothing.
+    const RETRACE_RADIUS = 16; // px: passing this close over an already-joined dot routes the line through it again
+    const near = (d, p) => Math.hypot(d.x - p.x, d.y - p.y);
+    function touchDots(p) {
+      const touched = dots.filter((d) => !d.hit && near(d, p) < HIT_RADIUS);
+      for (const d of touched) {
+        d.hit = true;
+        sfx.pop(dots.filter((o) => o.hit).length);
       }
+      if (!touched.length) {
+        const again = dots.find((d) => d.hit && near(d, p) < RETRACE_RADIUS);
+        if (again) touched.push(again);
+      }
+      return touched.sort((d1, d2) => near(d1, p) - near(d2, p));
     }
 
     const busy = () => phase === 'hold' || phase === 'morph' || phase === 'settle';
@@ -1837,22 +1845,27 @@
       status(`Join all the dots to make a ${digit}! ✏️`);
     }
 
+    let pen = null; // last pointer position of the current stroke
     drawCanvas.addEventListener('pointerdown', (e) => {
       if (!activeDigit || busy()) return;
-      stroke = [{ x: e.clientX, y: e.clientY }];
-      collectDots(stroke[0]);
+      pen = { x: e.clientX, y: e.clientY };
+      const touched = touchDots(pen);
+      if (!touched.length) return; // not on a dot: nothing starts, nothing is drawn
+      stroke = touched;
       renderDrawing();
       drawCanvas.setPointerCapture(e.pointerId);
       if (dots.every((d) => d.hit)) finishDots();
     });
     drawCanvas.addEventListener('pointermove', (e) => {
       if (!stroke) return;
-      // fill gaps between fast pointer samples so quick strokes still pass over dots
-      const last = stroke[stroke.length - 1];
+      // sample along the movement so quick strokes still pass over dots
       const p = { x: e.clientX, y: e.clientY };
-      const steps = Math.ceil(Math.hypot(p.x - last.x, p.y - last.y) / 10);
-      for (let i = 1; i <= steps; i++) collectDots({ x: last.x + ((p.x - last.x) * i) / steps, y: last.y + ((p.y - last.y) * i) / steps });
-      stroke.push(p);
+      const steps = Math.ceil(near(p, pen) / 10);
+      for (let i = 1; i <= steps; i++) {
+        const q = { x: pen.x + ((p.x - pen.x) * i) / steps, y: pen.y + ((p.y - pen.y) * i) / steps };
+        for (const d of touchDots(q)) if (d !== stroke[stroke.length - 1]) stroke.push(d);
+      }
+      pen = p;
       renderDrawing();
       if (dots.every((d) => d.hit)) finishDots();
     });
