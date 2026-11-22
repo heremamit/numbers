@@ -297,6 +297,18 @@
         vib.stop(t0 + dur + 0.05);
       },
       flap: () => noise({ f: 420 + rand() * 250, dur: 0.1, gain: 0.16 }),
+      swish: () => noise({ filter: 'bandpass', f: 500, f2: 3200, q: 1.4, dur: 0.28, gain: 0.22, attack: 0.18 }),
+      tock() { // club face meets the ball
+        tone({ type: 'triangle', f: 2300, f2: 1300, dur: 0.07, gain: 0.32 });
+        noise({ filter: 'highpass', f: 2500, dur: 0.03, gain: 0.25 });
+      },
+      cup() { // ball rattles round the cup and drops in
+        [0, 0.07, 0.13].forEach((at) => tone({ type: 'triangle', f: 1500, f2: 950, dur: 0.08, gain: 0.12, at }));
+        tone({ f: 520, f2: 300, dur: 0.16, gain: 0.2, at: 0.2 });
+      },
+      clap() { // a small crowd applauding
+        for (let i = 0; i < 34; i++) noise({ filter: 'bandpass', f: 1200 + rand() * 1800, q: 1.5, dur: 0.05, gain: 0.05 + rand() * 0.1, at: 0.25 + rand() * 1.8 });
+      },
       clank() {
         [523, 811, 1293, 1740].forEach((f) => tone({ type: 'triangle', f, dur: 0.5, gain: 0.06 }));
         noise({ filter: 'highpass', f: 3000, dur: 0.06, gain: 0.15 });
@@ -905,6 +917,75 @@
     santa.scale.setScalar(1.4);
     santa.visible = false;
     scene.add(santa);
+
+    // golf club for the 4: hangs from a swing pivot in front of Santa's chest; his arms reach for the grip
+    const golf = (() => {
+      const pivot = new THREE.Group();
+      pivot.position.set(0.1, 0.49, 0);
+      pivot.visible = false;
+      const club = new THREE.Group();
+      const grip = new THREE.Vector3(0.06, -0.5, 0), head = new THREE.Vector3(0.34, -1.3, 0);
+      const clubhead = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.05, 0.17), makeMat(C(0xc9d2e3), CHROME));
+      clubhead.position.copy(head).add(new THREE.Vector3(0.02, 0, 0.04));
+      club.add(
+        new THREE.Mesh(rod(grip.toArray(), grip.clone().lerp(head, 0.25).toArray(), 0.03), makeMat(C(0x1c1c1c), MATTE)),
+        new THREE.Mesh(rod(grip.toArray(), head.toArray(), 0.016), makeMat(C(0xc9d2e3), CHROME)),
+        clubhead,
+      );
+      club.traverse((o) => { if (o.isMesh) o.castShadow = true; });
+      pivot.add(club);
+      santa.userData.upper.add(pivot);
+      return { pivot, club, grip, head };
+    })();
+    const BALL_R = 0.08;
+    const golfBall = new THREE.Mesh(new THREE.SphereGeometry(BALL_R, 24, 16),
+      new THREE.MeshPhysicalMaterial({ color: 0xffffff, roughness: 0.35, clearcoat: 1, clearcoatRoughness: 0.2 }));
+    golfBall.castShadow = true;
+    golfBall.visible = false;
+    scene.add(golfBall);
+
+    // golfer's stance: feet apart, knees soft, bent over the ball; a = swing angle (0 = club at the ball,
+    // negative = backswing away from the flag, positive = follow-through)
+    const DOWN = new THREE.Vector3(0, -1, 0);
+    function poseGolf(a) {
+      const d = santa.userData;
+      d.body.position.y = -0.04;
+      d.legs.forEach((leg, i) => {
+        leg.hip.rotation.set((i ? 1 : -1) * 0.12, 0, 0.12);
+        leg.knee.rotation.z = -0.22;
+      });
+      d.upper.rotation.set(0, a * 0.25, -0.38);
+      d.head.rotation.set(0, -a * 0.2, -0.1); // eyes stay down on the ball
+      golf.pivot.rotation.set(a, 0, 0);
+      santa.updateMatrixWorld(true);
+      const gripWorld = golf.club.localToWorld(golf.grip.clone());
+      const gripInUpper = d.upper.worldToLocal(gripWorld);
+      for (const arm of d.arms) {
+        arm.shoulder.quaternion.setFromUnitVectors(DOWN, gripInUpper.clone().sub(arm.shoulder.position).normalize());
+        arm.elbow.rotation.set(0, 0, 0);
+      }
+      santa.updateMatrixWorld(true);
+    }
+    // stand him over the ball with the club sole resting on the grass; returns where the ball sits
+    function addressBall() {
+      golf.club.position.set(0, 0, 0);
+      for (let i = 0; i < 3; i++) {
+        poseGolf(0);
+        const headY = golf.club.localToWorld(golf.head.clone()).y;
+        golf.club.position.y += (GROUND_Y + 0.04 - headY) / santa.scale.y;
+      }
+      poseGolf(0);
+      const head = golf.club.localToWorld(golf.head.clone());
+      return new THREE.Vector3(head.x + 0.12, GROUND_Y + BALL_R, head.z + 0.04);
+    }
+    function resetFigure(fig) {
+      const d = fig.userData;
+      fig.rotation.set(0, 0, 0);
+      d.body.position.y = 0;
+      d.legs.forEach((leg) => leg.hip.rotation.set(0, 0, 0));
+      d.upper.rotation.set(0, 0, 0);
+      d.arms.forEach((arm) => arm.shoulder.rotation.set(0, 0, 0));
+    }
     const WALK_SPEED = 0.75;
 
     // ---------- the stage: everything a digit turns into lives in this group ----------
@@ -1117,7 +1198,10 @@
       { share: 0.72, color: C(0xe3262b), m: { side: THREE.DoubleSide, roughness: 0.85 }, geo: clothGeo },
       { share: 0.22, color: C(0xc9d2e3), m: STEEL, geo: rod([0.35, -1.6, 0], [0.35, 1.55, 0], 0.05) },
       { share: 0.06, color: C(0xe0a800), m: BRASS, geo: new THREE.SphereGeometry(0.1, 24, 16).translate(0.35, 1.62, 0) },
-      { color: C(0x8a8f98), m: MATTE, geo: new THREE.CylinderGeometry(0.28, 0.36, 0.1, 32).translate(0.35, -1.55, 0) },
+      // putting green round the cup the flag stands in
+      { color: C(0x63c94f), m: { roughness: 0.8 }, geo: new THREE.CircleGeometry(1.5, 48).rotateX(-Math.PI / 2).translate(0.35, -1.588, 0) },
+      { color: C(0xf2f2f2), m: MATTE, geo: new THREE.RingGeometry(0.13, 0.16, 32).rotateX(-Math.PI / 2).translate(0.35, -1.584, 0) },
+      { color: C(0x0c0c0c), m: MATTE, geo: new THREE.CircleGeometry(0.13, 32).rotateX(-Math.PI / 2).translate(0.35, -1.583, 0) },
     ]);
     function waveCloth(t, strength) {
       const pos = clothGeo.attributes.position;
@@ -1594,13 +1678,86 @@
           this.wind = loops.wind();
           this.wind.set(0.09, 1.5);
           this.nextFlap = 0.4;
-          status(again('Flag up! 🚩'));
+          // Santa strolls in from the left, turns side-on, and plays a shot at the flag
+          resetFigure(santa);
+          santa.visible = true;
+          santa.position.set(-8, GROUND_Y, 0);
+          this.golf = 'walk';
+          this.turnT = 0;
+          status('Fore! Santa is playing golf ⛳');
         },
         update(dt, t) {
           waveCloth(t, Math.min(1, t / 1.2)); // the breeze picks up
           if (t > this.nextFlap) {
             this.nextFlap = t + 0.22 + rand() * 0.4;
             sfx.flap();
+          }
+          this.updateGolf(dt, t);
+        },
+        updateGolf(dt, t) {
+          const ADDRESS_X = -4.3;
+          if (this.golf === 'walk') {
+            santa.position.x = Math.min(ADDRESS_X, santa.position.x + 1.3 * dt);
+            poseWalk(santa, now, true, 0);
+            if (santa.position.x === ADDRESS_X) this.golf = 'turn';
+            return;
+          }
+          if (this.golf === 'turn') { // face the camera, side-on to the flag
+            poseWalk(santa, now, false, 0);
+            this.turnT += dt;
+            santa.rotation.y = -Math.PI / 2 * easeInOut(Math.min(1, this.turnT / 0.5));
+            if (this.turnT >= 0.5) {
+              golf.pivot.visible = true;
+              this.tee = addressBall();
+              this.golf = 'swing';
+              this.swingStart = t;
+              this.round = -1;
+            }
+            return;
+          }
+          // one shot every 6 s: waggle, backswing, pause, strike, follow-through, ball flies into the cup
+          const PERIOD = 6, c = (t - this.swingStart) % PERIOD, round = Math.floor((t - this.swingStart) / PERIOD);
+          const TOP = -2.0, FINISH = 2.3, IMPACT = 2.07;
+          if (round !== this.round) { // new ball on the tee
+            this.round = round;
+            this.flight = null;
+            this.struck = this.swished = false;
+            golfBall.position.copy(this.tee);
+            golfBall.visible = true;
+          }
+          let a;
+          if (c < 0.8) a = Math.sin(c * 8) * 0.04;
+          else if (c < 1.8) a = TOP * easeInOut((c - 0.8) / 1.0);
+          else if (c < 1.95) a = TOP;
+          else if (c < IMPACT) { const k = (c - 1.95) / (IMPACT - 1.95); a = TOP * (1 - k * k); }
+          else if (c < 2.4) { const k = (c - IMPACT) / (2.4 - IMPACT); a = FINISH * (1 - (1 - k) ** 2); }
+          else if (c < 5.2) a = FINISH;
+          else a = FINISH * (1 - easeInOut((c - 5.2) / 0.8));
+          poseGolf(a);
+          if (!this.swished && c >= 1.95) { this.swished = true; sfx.swish(); }
+          if (!this.struck && c >= IMPACT) {
+            this.struck = true;
+            sfx.tock();
+            const hole = new THREE.Vector3(stage.position.x + 0.35, GROUND_Y + BALL_R, 0);
+            this.flight = { start: c, from: this.tee.clone(), to: hole, landed: false };
+          }
+          if (this.flight) {
+            const f = (c - this.flight.start) / 1.7;
+            if (f < 1) {
+              golfBall.position.lerpVectors(this.flight.from, this.flight.to, f);
+              golfBall.position.y += 3.2 * 4 * f * (1 - f); // high arc onto the green
+            } else {
+              golfBall.position.copy(this.flight.to);
+              golfBall.position.y -= Math.min(1, (f - 1) / 0.12) * BALL_R * 2.5; // drops into the cup
+              if (!this.flight.landed) {
+                this.flight.landed = true;
+                sfx.cup();
+                sfx.clap();
+                sfx.hoho(0.6);
+                status(again('Hole in one! ⛳'));
+              }
+              if (f > 1.15) golfBall.visible = false;
+            }
           }
         },
       },
@@ -1704,7 +1861,8 @@
         s.model.group.visible = false;
         s.reset?.();
       }
-      for (const o of [particles, kidGroup, soundGroup, santa, snowfall]) o.visible = false;
+      for (const o of [particles, kidGroup, soundGroup, santa, snowfall, golfBall, golf.pivot]) o.visible = false;
+      resetFigure(santa);
       stage.position.set(0, 0, 0);
       stage.rotation.set(0, 0, 0);
       stage.scale.setScalar(1);
@@ -1812,7 +1970,7 @@
     // ---------- spoken hint when a number is picked (browser text-to-speech) ----------
     const KID_NAME = 'Advik';
     const LOOKS_LIKE = {
-      1: 'a rocket', 2: 'a slide with a long pipe', 3: 'a twisty slide', 4: 'a flag', 5: 'a crane hook',
+      1: 'a rocket', 2: 'a slide with a long pipe', 3: 'a twisty slide', 4: 'a golf flag', 5: 'a crane hook',
       6: 'a whistle', 7: 'a walking stick', 8: 'a snowman', 9: 'a lollipop',
     };
     let voice = null;
