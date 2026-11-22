@@ -1963,23 +1963,105 @@
       },
       6: {
         digit: buildDigit([sixPath]), model: whistle, restY: GROUND_Y - WHISTLE_BOTTOM,
-        enter() { this.blows = -1; soundGroup.visible = true; status(again('TWEEEET! 📯')); },
+        // Santa walks up, picks the whistle up by its chamber, puts the mouthpiece to his lips and blows
+        GRIP: new THREE.Vector3(-0.7, -0.6, 0),  // left edge of the round chamber (whistle space)
+        TIP: new THREE.Vector3(0.7, 1.45, 0),    // end of the mouthpiece
+        HELD: 0.25,                               // whistle scale once in Santa's hand
+        reset() {
+          soundGroup.rotation.set(0, 0, 0);
+          soundGroup.scale.setScalar(1);
+        },
+        enter() {
+          resetFigure(santa);
+          santa.visible = true;
+          santa.position.set(-6, GROUND_Y, 0);
+          santa.userData.reachAngle = 0.25;
+          santa.userData.carryElbow = 0.35;
+          this.mode = 'approach';
+          this.modeT = 0;
+          this.blows = -1;
+          this.blowing = false;
+          soundGroup.visible = false;
+          status('Santa found a whistle! 📯');
+        },
+        // where the stage must sit so that point p of the whistle lands on target, turned by ry and scaled by s
+        placeAt(target, p, ry, s) {
+          return target.clone().sub(p.clone().applyEuler(new THREE.Euler(0, ry, 0)).multiplyScalar(s));
+        },
+        mouth() {
+          return santa.userData.head.localToWorld(new THREE.Vector3(0.13, -0.06, 0));
+        },
         update(dt, t) {
-          // blow for 1.2s, rest 1s, repeat: the whistle shakes and sound waves fan out
-          const BLOW = 1.2, CYCLE = 2.2, c = t % CYCLE, blowing = c < BLOW;
-          const blow = Math.floor(t / CYCLE);
+          this.modeT += dt;
+          const d = santa.userData;
+          if (this.mode === 'approach') {
+            santa.position.x += WALK_SPEED * dt;
+            poseWalk(santa, now, true, 0);
+            santa.updateMatrixWorld(true);
+            d.hand.getWorldPosition(handWorld);
+            if (handWorld.x >= stage.position.x + this.GRIP.x - 0.05) this.next('grab');
+            return;
+          }
+          poseWalk(santa, now, false, 1);
+          if (this.mode === 'blow') { // chin up and a slight lean back while blowing (posed before the whistle is placed)
+            d.head.rotation.z = this.blowing ? 0.12 : 0.04;
+            d.upper.rotation.z = this.blowing ? 0.05 : 0;
+          }
+          if (this.mode === 'grab') { // lift it, turning it round so the mouthpiece points back at him
+            const k = THREE.MathUtils.smootherstep(this.modeT / 1.1, 0, 1);
+            santa.updateMatrixWorld(true);
+            d.hand.getWorldPosition(handWorld);
+            const s = lerp(1, this.HELD, k), ry = Math.PI * k;
+            stage.position.lerp(this.placeAt(handWorld, this.GRIP, ry, s), k);
+            stage.rotation.set(0, ry, 0);
+            stage.scale.setScalar(s);
+            if (this.modeT > 1.2) { this.next('raise'); sfx.pick(); }
+            return;
+          }
+          // raise / blow: the mouthpiece rests on his lips, his hand holds the chamber up in front of him
+          const k = this.mode === 'raise' ? easeInOut(Math.min(1, this.modeT / 0.8)) : 1;
+          stage.rotation.set(0, Math.PI, 0);
+          stage.scale.setScalar(this.HELD);
+          santa.updateMatrixWorld(true);
+          d.hand.getWorldPosition(handWorld);
+          const inHand = this.placeAt(handWorld, this.GRIP, Math.PI, this.HELD);
+          const atMouth = this.placeAt(this.mouth(), this.TIP, Math.PI, this.HELD);
+          stage.position.lerpVectors(inHand, atMouth, k);
+          if (k === 1) { // reach for the chamber, wherever the whistle now sits
+            stage.updateMatrixWorld(true);
+            const chamber = d.upper.worldToLocal(stage.localToWorld(new THREE.Vector3(0, -0.6, 0)));
+            const arm = d.arms[0];
+            arm.shoulder.quaternion.setFromUnitVectors(DOWN, chamber.sub(arm.shoulder.position).normalize());
+            arm.elbow.rotation.z = 0;
+          }
+          if (this.mode === 'raise') {
+            if (this.modeT >= 0.8) {
+              this.next('blow');
+              soundGroup.visible = true;
+              soundGroup.rotation.y = Math.PI;            // sound fans out in front of him, not into his face
+              soundGroup.scale.setScalar(0.5 / this.HELD); // keep the waves a readable size
+            }
+            return;
+          }
+          // blow for 1.2 s, rest 1.2 s, repeat
+          const BLOW = 1.2, CYCLE = 2.4, c = this.modeT % CYCLE, blowing = c < BLOW;
+          const blow = Math.floor(this.modeT / CYCLE);
           if (blow !== this.blows) {
             this.blows = blow;
             sfx.whistle(BLOW);
+            if (blow === 0) status(again('TWEEEET! Santa blows the whistle! 📯'));
           }
-          stage.position.x = blowing ? (rand() - 0.5) * 0.04 : 0;
-          stage.position.y = this.restY + (blowing ? rand() * 0.03 : 0);
-          stage.rotation.z = blowing ? Math.sin(now * 60) * 0.012 : 0;
+          this.blowing = blowing;
+          d.body.position.y = blowing ? Math.sin(now * 40) * 0.004 : 0;
           soundArcs.forEach((arc, i) => {
-            const s = blowing ? ((c / BLOW) * 2 + i / soundArcs.length) % 1 : 1;
-            arc.scale.setScalar(0.4 + s * 1.6);
-            arc.material.opacity = blowing ? (1 - s) * 0.9 : 0;
+            const p = blowing ? ((c / BLOW) * 2 + i / soundArcs.length) % 1 : 1;
+            arc.scale.setScalar(0.4 + p * 1.6);
+            arc.material.opacity = blowing ? (1 - p) * 0.9 : 0;
           });
+        },
+        next(mode) {
+          this.mode = mode;
+          this.modeT = 0;
         },
       },
       7: {
