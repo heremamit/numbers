@@ -277,23 +277,6 @@
         tone({ f: 120, f2: 42, dur: 0.28, gain: 0.5 });
         noise({ f: 350, dur: 0.12, gain: 0.22 });
       },
-      quack(at = 0) {
-        // sawtooth through two formant filters, pitch falling: "kwaak"
-        const ctx = actx(), t0 = ctx.currentTime + at, dur = 0.17;
-        const o = ctx.createOscillator(), g = ctx.createGain();
-        o.type = 'sawtooth';
-        o.frequency.setValueAtTime(700, t0);
-        o.frequency.exponentialRampToValueAtTime(420, t0 + dur);
-        g.gain.setValueAtTime(0.0001, t0);
-        g.gain.linearRampToValueAtTime(0.5, t0 + 0.015);
-        g.gain.setValueAtTime(0.5, t0 + dur * 0.6);
-        g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
-        filtered(ctx, o, 'bandpass', 1050, 5).connect(g);
-        filtered(ctx, o, 'bandpass', 2300, 6).connect(g);
-        g.connect(audio.master);
-        o.start(t0);
-        o.stop(t0 + dur + 0.05);
-      },
       beep: () => tone({ type: 'square', f: 880, dur: 0.18, gain: 0.05 }),
       ignite: () => noise({ f: 2400, f2: 200, dur: 1.2, gain: 0.4, attack: 0.05 }),
       whee() {
@@ -443,7 +426,6 @@
     }
 
     // surface presets
-    const PLASTIC = { roughness: 0.35, clearcoat: 1, clearcoatRoughness: 0.1 };
     const STEEL = { metalness: 0.9, roughness: 0.28 };
     const CHROME = { metalness: 0.6, roughness: 0.25 }; // not a full mirror: there is only sky and grass to reflect
     const BRASS = { metalness: 1, roughness: 0.3 };
@@ -1025,64 +1007,82 @@
       smokeGeo.attributes.aLife.needsUpdate = true;
     }
 
-    // ---------- 2 → rubber duck (facing +X) ----------
-    const duckYellow = C(0xffd21f);
-    const duck = buildModel([
-      { share: 0.38, color: duckYellow, m: PLASTIC, geo: transformed(new THREE.SphereGeometry(1, 48, 32), { scale: [1.4, 0.9, 1.0] }) },
-      { share: 0.20, color: duckYellow, m: PLASTIC, name: 'head', geo: transformed(new THREE.SphereGeometry(0.6, 48, 32), { pos: [1.0, 1.05, 0] }) },
-      { share: 0.08, color: duckYellow, m: PLASTIC, geo: transformed(new THREE.ConeGeometry(0.4, 0.8, 32), { pos: [-1.4, 0.35, 0], rot: [0, 0, 1.04] }) },
-      { share: 0.10, color: C(0xf2a900), m: PLASTIC, name: 'wingR', geo: transformed(new THREE.SphereGeometry(0.55, 32, 16), { pos: [-0.1, 0.15, 0.95], rot: [0, 0, -0.25], scale: [1.2, 0.5, 0.25] }) },
-      { share: 0.10, color: C(0xf2a900), m: PLASTIC, name: 'wingL', geo: transformed(new THREE.SphereGeometry(0.55, 32, 16), { pos: [-0.1, 0.15, -0.95], rot: [0, 0, -0.25], scale: [1.2, 0.5, 0.25] }) },
-      { share: 0.09, color: C(0xff6a00), m: PLASTIC, name: 'head', geo: transformed(new THREE.SphereGeometry(0.3, 32, 16), { pos: [1.6, 0.95, 0], scale: [1.4, 0.45, 1.0] }) },
-      { share: 0.05, color: C(0x111111), m: { roughness: 0.1 }, name: 'head', geos: [0.3, -0.3].map((z) => new THREE.SphereGeometry(0.09, 16, 12).translate(1.45, 1.25, z)) },
-      { color: C(0xffffff), m: { roughness: 0.2 }, name: 'head', geos: [0.34, -0.34].map((z) => new THREE.SphereGeometry(0.028, 8, 6).translate(1.51, 1.29, z)) },
-    ], -0.35);
-    setPivot(duck.named.head, 0.75, 0.55, 0);
-    setPivot(duck.named.wingR, -0.1, 0.4, 0.85);
-    setPivot(duck.named.wingL, -0.1, 0.4, -0.85);
-
-    // ---------- 3 → "3"-shaped tube slide: two see-through loops, like the digit ----------
-    const SLIDE_SCALE = 1.2, SLIDE_GROUND = -2.05, SLIDE_OFFSET = 0.15, TUBE_R = 0.3;
-    const scaled3 = threePts.map((p) => p.clone().multiplyScalar(SLIDE_SCALE));
-    const slideCurve = new THREE.CatmullRomCurve3(scaled3);
-    const slideStart = slideCurve.getPointAt(0);
-    const mid = Math.floor(scaled3.length / 2);
-    const PLAT_Y = slideStart.y - TUBE_R;
-    const ladderX = slideStart.x - 0.75;
-    const ladderParts = [];
-    for (const z of [0.35, -0.35]) ladderParts.push(rod([ladderX - 0.35, SLIDE_GROUND, z], [ladderX, PLAT_Y, z]));
-    for (let i = 1; i <= 8; i++) {
-      const t = i / 9;
-      const x = ladderX - 0.35 + 0.35 * t, y = SLIDE_GROUND + (PLAT_Y - SLIDE_GROUND) * t;
-      ladderParts.push(rod([x, y, 0.35], [x, y, -0.35], 0.03));
-    }
-    const supportParts = [];
-    for (const u of [0.0, 0.3, 0.5, 0.72]) {
-      const p = slideCurve.getPointAt(u);
-      for (const z of [0.18, -0.18]) supportParts.push(rod([p.x, SLIDE_GROUND, z], [p.x, p.y - TUBE_R, z], 0.035));
-    }
+    // ---------- 2 and 3 → see-through tube slides shaped like the digit, with Santas riding down ----------
+    const SLIDE_SCALE = 1.2, SLIDE_OFFSET = 0.15, TUBE_R = 0.3;
     // tinted clear plastic, so the riders are visible inside
     const CLEAR = { transparent: true, opacity: 0.42, side: THREE.DoubleSide, depthWrite: false, roughness: 0.12 };
-    const slide = buildModel([
-      { share: 0.36, color: C(0xff3d43), m: CLEAR, geo: new THREE.TubeGeometry(new THREE.CatmullRomCurve3(scaled3.slice(0, mid + 1)), 200, TUBE_R, 24, false) },
-      { share: 0.36, color: C(0x1f8fe8), m: CLEAR, geo: new THREE.TubeGeometry(new THREE.CatmullRomCurve3(scaled3.slice(mid)), 200, TUBE_R, 24, false) },
-      { share: 0.08, color: C(0xffc21a), m: PAINTED, geo: transformed(new THREE.BoxGeometry(0.8, 0.06, 0.8), { pos: [slideStart.x - 0.4, PLAT_Y, 0] }) },
-      { share: 0.12, color: C(0xc9d2e3), m: STEEL, geos: ladderParts },
-      { share: 0.08, color: C(0xc9d2e3), m: STEEL, geos: supportParts },
-    ], SLIDE_OFFSET);
+
+    // pieces = [{ pts, color }] in digit space, laid end to end; the riders follow all of them in order.
+    // ground = height the ladder and legs stand on (model space, before SLIDE_OFFSET).
+    function makeTubeSlide(pieces, ground, supportsAt) {
+      const scaled = pieces.map((piece) => ({ ...piece, pts: piece.pts.map((p) => p.clone().multiplyScalar(SLIDE_SCALE)) }));
+      const curve = new THREE.CatmullRomCurve3(scaled.flatMap((piece, i) => (i ? piece.pts.slice(1) : piece.pts)));
+      const start = curve.getPointAt(0);
+      const platY = start.y - TUBE_R;
+      const ladderX = start.x - 0.75;
+      const ladderParts = [];
+      for (const z of [0.35, -0.35]) ladderParts.push(rod([ladderX - 0.35, ground, z], [ladderX, platY, z]));
+      for (let i = 1; i <= 8; i++) {
+        const t = i / 9;
+        const x = ladderX - 0.35 + 0.35 * t, y = ground + (platY - ground) * t;
+        ladderParts.push(rod([x, y, 0.35], [x, y, -0.35], 0.03));
+      }
+      const supportParts = [];
+      for (const u of supportsAt) {
+        const p = curve.getPointAt(u);
+        for (const z of [0.18, -0.18]) supportParts.push(rod([p.x, ground, z], [p.x, p.y - TUBE_R, z], 0.035));
+      }
+      const tubeShare = 0.72 / scaled.length;
+      const model = buildModel([
+        ...scaled.map((piece) => ({
+          share: tubeShare, color: C(piece.color), m: CLEAR,
+          geo: new THREE.TubeGeometry(new THREE.CatmullRomCurve3(piece.pts), 160, TUBE_R, 24, false),
+        })),
+        { share: 0.08, color: C(0xffc21a), m: PAINTED, geo: transformed(new THREE.BoxGeometry(0.8, 0.06, 0.8), { pos: [start.x - 0.4, platY, 0] }) },
+        { share: 0.12, color: C(0xc9d2e3), m: STEEL, geos: ladderParts },
+        { share: 0.08, color: C(0xc9d2e3), m: STEEL, geos: supportParts },
+      ], SLIDE_OFFSET);
+      return { model, curve, restY: GROUND_Y - (ground + SLIDE_OFFSET) };
+    }
+
+    // "3": the upper loop red, the lower loop blue
+    const midThree = Math.floor(threePts.length / 2);
+    const slide3 = makeTubeSlide([
+      { pts: threePts.slice(0, midThree + 1), color: 0xff3d43 },
+      { pts: threePts.slice(midThree), color: 0x1f8fe8 },
+    ], -2.05, [0.0, 0.3, 0.5, 0.72]);
+
+    // "2": red half circle, yellow drop, then a long blue horizontal pipe out along the ground.
+    // The sharp bottom corner of the digit is rounded off so riders (and the tube) can get round it.
+    const twoCorner = twoBL.clone();
+    const twoArcEnd = arcPts[arcPts.length - 1];
+    const CORNER = 0.45;
+    const intoCorner = twoCorner.clone().add(twoArcEnd.clone().sub(twoCorner).setLength(CORNER));
+    const outOfCorner = twoCorner.clone().add(new THREE.Vector3(CORNER, 0, 0));
+    const roundCorner = new THREE.QuadraticBezierCurve3(intoCorner, twoCorner, outOfCorner).getPoints(10);
+    const slide2 = makeTubeSlide([
+      { pts: arcPts, color: 0xff3d43 },
+      { pts: [...new THREE.LineCurve3(twoArcEnd, intoCorner).getPoints(8), ...roundCorner.slice(1)], color: 0xffb81f },
+      { pts: new THREE.LineCurve3(outOfCorner, twoBR).getPoints(10), color: 0x1f8fe8 },
+    ], -1.35 * SLIDE_SCALE - TUBE_R - 0.06, [0.0, 0.32, 0.5]);
 
     const kidGroup = new THREE.Group();
     kidGroup.visible = false;
     kids.forEach((k) => kidGroup.add(k.obj));
     stage.add(kidGroup);
     const SLIDE_CYCLE = 4.4;
-    function updateKids(time) {
+    function startRiders() {
+      // Santas already part-way down at the start stay quiet until their next turn
+      kids.forEach((k) => { k.lastWhee = k.offset % SLIDE_CYCLE >= 0.5 ? 0 : -1; });
+      kidGroup.visible = true;
+    }
+    function updateKids(time, slideCurve) {
       for (const k of kids) {
         const cycle = Math.floor((time + k.offset) / SLIDE_CYCLE);
         const c = (time + k.offset) % SLIDE_CYCLE;
         let u, scale = 0.36; // small enough to sit inside the tube
         if (c < 0.5) { u = 0; scale *= c / 0.5; }                             // pop in on the platform
-        else if (c < 3.8) { const s = (c - 0.5) / 3.3; u = s * (0.4 + 0.6 * s); } // ride both loops, speeding up
+        else if (c < 3.8) { const s = (c - 0.5) / 3.3; u = s * (0.4 + 0.6 * s); } // ride the whole tube, speeding up
         else { u = 1; scale *= 1 - (c - 3.8) / 0.6; }                         // shrink away at the exit
         if (c >= 0.5 && k.lastWhee !== cycle) {
           k.lastWhee = cycle;
@@ -1090,7 +1090,7 @@
         }
         const p = slideCurve.getPointAt(u);
         const t = slideCurve.getTangentAt(u);
-        // seated on the tube's inner wall: shifted off the centre line, away from the kid's own "up"
+        // seated on the tube's inner wall: shifted off the centre line, away from the rider's own "up"
         k.obj.position.set(p.x + t.y * TUBE_R * 0.65, p.y + SLIDE_OFFSET - t.x * TUBE_R * 0.65, 0);
         k.obj.rotation.z = Math.atan2(t.y, t.x); // legs point along the slide
         k.obj.scale.setScalar(Math.max(0.001, scale));
@@ -1578,35 +1578,14 @@
         lookY: () => clamp(stage.position.y * 0.5, -0.4, 6), // camera tilts up to follow
       },
       2: {
-        digit: buildDigit([twoPath]), model: duck, restY: GROUND_Y + 0.9 + 0.35,
-        enter() { this.quacks = -1; status(again('Quack! 🦆')); },
-        update(dt, t) {
-          // every couple of seconds: two quacks, each with a little hop and a wing flap
-          const CYCLE = 2.6, c = t % CYCLE, hopping = t > 0.4 && c < 0.5;
-          const cycle = Math.floor(t / CYCLE);
-          if (t > 0.4 && cycle !== this.quacks) {
-            this.quacks = cycle;
-            sfx.quack(0);
-            sfx.quack(0.25);
-          }
-          const beat = hopping ? Math.abs(Math.sin((c / 0.25) * Math.PI)) : 0;
-          stage.position.y = this.restY + beat * 0.12;
-          duck.named.wingR.rotation.x = -beat * 0.7;
-          duck.named.wingL.rotation.x = beat * 0.7;
-          duck.named.head.rotation.z = Math.sin(t * 1.3) * 0.05 + beat * 0.12;
-          stage.rotation.y = -0.25 + Math.sin(t * 0.5) * 0.35; // waddles round to look about
-          stage.rotation.z = Math.sin(t * 3) * 0.02;
-        },
+        digit: buildDigit([twoPath]), model: slide2.model, restY: slide2.restY,
+        enter() { startRiders(); status(again('Down the pipe! 🛝')); },
+        update(dt, t) { updateKids(t, slide2.curve); },
       },
       3: {
-        digit: buildDigit([threePath]), model: slide, restY: GROUND_Y - (SLIDE_GROUND + SLIDE_OFFSET),
-        enter() {
-          // Santas already part-way down at the start stay quiet until their next turn
-          kids.forEach((k) => { k.lastWhee = k.offset % SLIDE_CYCLE >= 0.5 ? 0 : -1; });
-          kidGroup.visible = true;
-          status(again('Wheee! 🛝'));
-        },
-        update(dt, t) { updateKids(t); },
+        digit: buildDigit([threePath]), model: slide3.model, restY: slide3.restY,
+        enter() { startRiders(); status(again('Wheee! 🛝')); },
+        update(dt, t) { updateKids(t, slide3.curve); },
       },
       4: {
         digit: buildDigit([fourPath, stemPath]), model: flag, restY: GROUND_Y + 1.6,
@@ -1833,7 +1812,7 @@
     // ---------- spoken hint when a number is picked (browser text-to-speech) ----------
     const KID_NAME = 'Advik';
     const LOOKS_LIKE = {
-      1: 'a rocket', 2: 'a duck', 3: 'a slide', 4: 'a flag', 5: 'a crane hook',
+      1: 'a rocket', 2: 'a slide with a long pipe', 3: 'a twisty slide', 4: 'a flag', 5: 'a crane hook',
       6: 'a whistle', 7: 'a walking stick', 8: 'a snowman', 9: 'a lollipop',
     };
     let voice = null;
