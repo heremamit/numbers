@@ -24,8 +24,6 @@
     }
     #picker button:hover, #mute:hover { background: #1e2a48; }
     #picker button.active { background: #ffd23f; border-color: #ffd23f; color: #0b0f1a; }
-    #picker button.hint { background: #35c46a; border-color: #35c46a; animation: hint 0.7s ease-in-out infinite alternate; }
-    @keyframes hint { to { transform: scale(1.3); } }
     #status.mic::after { content: ' 🎤'; }
     #status.wrong { background: rgba(214, 40, 57, 0.92); animation: shake 0.45s; }
     @keyframes shake {
@@ -1656,9 +1654,9 @@
     stage.add(particles);
 
     // ---------- game state ----------
-    const HOLD = 1.4, MORPH = 3.0, SETTLE = 0.7;
+    const HOLD = 1.4, WRONG = 1.5, MORPH = 3.0, SETTLE = 0.7;
     let current = null;   // active SHAPES entry
-    let phase = 'idle';   // idle | ask | hold | morph | settle | done
+    let phase = 'idle';   // idle | ask | wrong | hold | morph | settle | done
     let phaseTime = 0;
     let now = 0;
     const statusEl = document.getElementById('status');
@@ -2280,7 +2278,7 @@
       phase = 'ask';
       phaseTime = 0;
       sfx.chime();
-      quiz = { digit, misses: 0, asked: 0, talking: false };
+      quiz = { digit, asked: 0, talking: false };
       status('Which number is this? 🤔');
       ask(`${KID_NAME}, which number is this?`);
     }
@@ -2368,7 +2366,7 @@
       return touched.sort((d1, d2) => near(d1, p) - near(d2, p));
     }
 
-    const busy = () => phase === 'ask' || phase === 'hold' || phase === 'morph' || phase === 'settle';
+    const busy = () => ['ask', 'wrong', 'hold', 'morph', 'settle'].includes(phase);
 
     // ---------- spoken hint when a number is picked (browser text-to-speech) ----------
     const KID_NAME = 'Advik';
@@ -2419,8 +2417,9 @@
       }
     }
 
-    // ---------- "which number is this?": the drawn number only transforms once it has been named ----------
+    // ---------- "which number is this?": the drawn number only transforms if it is named correctly ----------
     // The answer can be spoken (speech recognition, where the browser has it) or tapped on the number bar.
+    // There is one try: a wrong answer sends the number away and it has to be drawn again.
     const SPOKEN = { // first entry is the real word, the rest are what recognisers tend to hear instead
       1: ['one', 'won', 'wan'], 2: ['two', 'to', 'too', 'tu'], 3: ['three', 'tree', 'free', 'thri'],
       4: ['four', 'for', 'fore', 'foor'], 5: ['five', 'fife', 'hive'], 6: ['six', 'sex', 'sics', 'sick'],
@@ -2437,7 +2436,8 @@
       return 0;
     };
 
-    let quiz = { digit: 0, misses: 0, asked: 0, talking: false };
+    let quiz = { digit: 0, asked: 0, talking: false };
+    const missed = { digit: 0, count: 0 }; // wrong answers in a row for the same number
     const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     let rec = null;
     let micOk = !!Recognition;
@@ -2456,7 +2456,7 @@
             const result = e.results[i];
             const heard = Array.from(result, (alt) => alt.transcript);
             if (heard.some(saysTarget)) return answer(quiz.digit);
-            // anything else said, once the recogniser has settled on it, is a wrong answer
+            // anything else said, once the recogniser has settled on it: another number is a wrong answer
             if (result.isFinal && wordsIn(heard[0]).length) return answer(otherNumber(heard[0]));
           }
         };
@@ -2495,9 +2495,8 @@
       });
     }
 
-    const pickerButtons = [...document.querySelectorAll('#picker button')];
     let wrongTimer = 0;
-    function flagWrong(on) {
+    function flagWrong(on) { // red, shaking status bar
       clearTimeout(wrongTimer);
       statusEl.classList.remove('wrong');
       if (!on) return;
@@ -2510,34 +2509,36 @@
     function answer(n) {
       if (phase !== 'ask') return;
       const { digit } = quiz;
+      if (!n) {
+        // not an answer yet: ask for a number, the try isn't used up
+        status('Say the number! 🤔');
+        ask('Tell me the number. Which number is this?');
+        return;
+      }
+      stopListening();
+      phaseTime = 0;
       if (n === digit) {
-        stopListening();
+        missed.count = 0;
         flagWrong(false);
-        pickerButtons.forEach((b) => b.classList.remove('hint'));
         phase = 'hold';
-        phaseTime = 0;
         sfx.chime();
         sfx.clap();
         status(`Yes! It's ${digit}! 🎉`);
         say(`Yes! This is ${digit}! Well done, ${KID_NAME}!`);
         return;
       }
+      // wrong: no second try, no transformation. The number goes away and has to be drawn again.
+      if (missed.digit !== digit) { missed.digit = digit; missed.count = 0; }
+      const tell = ++missed.count >= 2; // missed twice running: say what it really is
+      phase = 'wrong';
       sfx.oops();
       flagWrong(true);
-      const wrong = n ? `No, that is wrong. This is not ${n}.` : 'No, that is wrong.';
-      if (++quiz.misses >= 2) {
-        // two misses: show and tell the answer, but it still has to be said or tapped
-        pickerButtons.forEach((b) => b.classList.toggle('hint', +b.dataset.digit === digit));
-        status(`❌ Wrong! This is ${digit}. Say ${digit}!`);
-        ask(`${wrong} This is ${digit}. Can you say ${digit}?`);
-      } else {
-        status(n ? `❌ Wrong! Not ${n}. Try again!` : '❌ Wrong! Try again!');
-        ask(`${wrong} Try again! Which number is this?`);
-      }
+      status(tell ? `❌ Wrong! This is ${digit}. Draw it again!` : `❌ Wrong! Not ${n}. Draw it again!`);
+      say(`No, that is wrong. This is not ${n}. ${tell ? `This is ${digit}. ` : ''}Draw it again!`);
     }
 
-    function selectDigit(digit) {
-      if (busy()) return;
+    // lay out the dots of a number, ready to be joined
+    function showDots(digit) {
       clearStage();
       current = null;
       phase = 'idle';
@@ -2548,6 +2549,12 @@
       layoutDots();
       renderDrawing();
       document.querySelectorAll('#picker button').forEach((b) => b.classList.toggle('active', +b.dataset.digit === digit));
+    }
+
+    function selectDigit(digit) {
+      if (busy()) return;
+      flagWrong(false);
+      showDots(digit);
       sfx.click();
       say(`${KID_NAME}, you are drawing ${digit}. It looks like ${LOOKS_LIKE[digit]}!`);
       status(`Join all the dots to make a ${digit}! ✏️`);
@@ -2649,6 +2656,16 @@
         const pop = lerp(0.6, 1, easeOutBack(Math.min(1, phaseTime / 0.35)));
         current.digit.group.scale.setScalar(pop * (1 + Math.sin(phaseTime * 3) * 0.03));
         if (!quiz.talking && phaseTime - quiz.asked > 15) ask(`${KID_NAME}, which number is this?`);
+      } else if (phase === 'wrong') {
+        // named wrongly: the number shakes its head and shrinks away, then its dots come back to be joined again
+        const g = current.digit.group;
+        g.rotation.z = Math.sin(phaseTime * 22) * 0.12 * Math.max(0, 1 - phaseTime / 0.8);
+        g.scale.setScalar(Math.max(0.001, 1 - easeInOut(clamp((phaseTime - 0.9) / 0.5, 0, 1))));
+        if (phaseTime > WRONG) {
+          g.rotation.z = 0;
+          g.scale.setScalar(1);
+          showDots(quiz.digit); // the "wrong" message stays up and keeps being spoken over the fresh dots
+        }
       } else if (phase === 'hold') {
         // named correctly: a happy hop, then it breaks into particles
         current.digit.group.scale.setScalar(1 + Math.sin(Math.PI * Math.min(1, phaseTime / 0.4)) * 0.12);
