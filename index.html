@@ -2464,10 +2464,14 @@
     const onIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
     const NO_LISTENING = onIOS ? "This browser can't listen. Open the game in Safari, or tap the number."
       : "This browser can't listen. Tap the number instead.";
+    const inApp = !!window.webkit?.messageHandlers?.speech; // running inside the iPad app, which listens natively
     const MIC_PROBLEMS = {
-      'not-allowed': onIOS ? 'Tap 🎤 and allow the microphone. (Settings › Safari › Microphone)' : 'Tap 🎤 and allow the microphone.',
-      // on iPad/iPhone this is the system-wide "Speech Recognition" permission for the browser being off
-      'service-not-allowed': onIOS ? 'Speech Recognition is off for Safari. Open Settings › Privacy & Security › Speech Recognition, turn on Safari, then tap 🎤.' : NO_LISTENING,
+      'not-allowed': inApp ? 'Allow the microphone in Settings › Draw a Digit, then tap 🎤.'
+        : onIOS ? 'Tap 🎤 and allow the microphone. (Settings › Safari › Microphone)' : 'Tap 🎤 and allow the microphone.',
+      // on iPad/iPhone this is the system "Speech Recognition" permission being off for the app or browser
+      'service-not-allowed': inApp ? 'Allow Speech Recognition in Settings › Draw a Digit, then tap 🎤.'
+        : onIOS ? 'Speech Recognition is off for Safari. Open Settings › Privacy & Security › Speech Recognition, turn on Safari, then tap 🎤.'
+          : NO_LISTENING,
       'audio-capture': "The microphone isn't working. Tap 🎤 to try again.",
       network: 'Listening needs the internet. Tap 🎤 to try again.',
     };
