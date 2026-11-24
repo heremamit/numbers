@@ -24,7 +24,20 @@
     }
     #picker button:hover, #mute:hover { background: #1e2a48; }
     #picker button.active { background: #ffd23f; border-color: #ffd23f; color: #0b0f1a; }
-    #status.mic::after { content: ' 🎤'; }
+    #mic {
+      position: fixed; bottom: 84px; left: 50%; transform: translateX(-50%); z-index: 2; display: none;
+      width: 84px; height: 84px; border-radius: 50%; border: 4px solid #fff; cursor: pointer;
+      background: #6b7280; font-size: 40px; line-height: 1; padding: 0; box-shadow: 0 6px 18px rgba(0, 0, 0, 0.35);
+    }
+    #mic.show { display: block; }
+    #mic.on { background: #e11d48; animation: listening 0.8s ease-in-out infinite alternate; }
+    @keyframes listening { to { box-shadow: 0 0 0 16px rgba(225, 29, 72, 0.3); } }
+    #micnote {
+      position: fixed; bottom: 178px; left: 50%; transform: translateX(-50%); z-index: 2; max-width: 88vw;
+      padding: 6px 14px; border-radius: 14px; background: rgba(11, 15, 26, 0.75); color: #fff;
+      font: 600 15px system-ui, sans-serif; text-align: center; pointer-events: none;
+    }
+    #micnote:empty { display: none; }
     #status.wrong { background: rgba(214, 40, 57, 0.92); animation: shake 0.45s; }
     @keyframes shake {
       20%, 60% { transform: translateX(calc(-50% - 10px)); }
@@ -47,6 +60,8 @@
   <canvas id="draw"></canvas>
   <div id="status">Pick a number below 👇</div>
   <button id="mute" title="Sound on/off">🔊</button>
+  <button id="mic" title="Tap and say the number">🎤</button>
+  <div id="micnote"></div>
   <div id="flash"></div>
   <div id="photo"><canvas width="360" height="360"></canvas><div>Santa &amp; Snowman ❤️</div></div>
   <div id="picker">
@@ -2442,47 +2457,112 @@
     let rec = null;
     let micOk = !!Recognition;
 
+    // What the kid sees of the mic: a big button (grey = off, tap to talk; red and pulsing = listening)
+    // and, when listening can't work, a line saying why.
+    const micBtn = document.getElementById('mic');
+    const micNote = document.getElementById('micnote');
+    const onIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+    const NO_LISTENING = onIOS ? "This browser can't listen. Open the game in Safari, or tap the number."
+      : "This browser can't listen. Tap the number instead.";
+    const MIC_PROBLEMS = {
+      'not-allowed': onIOS ? 'Tap 🎤 and allow the microphone. (Settings › Safari › Microphone)' : 'Tap 🎤 and allow the microphone.',
+      'service-not-allowed': onIOS ? 'Turn on Dictation in Settings › General › Keyboard, then tap 🎤.' : NO_LISTENING,
+      'audio-capture': "The microphone isn't working. Tap 🎤 to try again.",
+      network: 'Listening needs the internet. Tap 🎤 to try again.',
+    };
+    let listening = false; // the recogniser has really started
+    let micProblem = Recognition ? '' : NO_LISTENING;
+    let micFails = 0;
+    let recLang = 'en-IN';
+    let settleTimer = 0;
+    let startTimer = 0;
+    let shownNote = '';
+    function syncMic() {
+      const asking = phase === 'ask';
+      micBtn.classList.toggle('show', asking && !!Recognition);
+      micBtn.classList.toggle('on', asking && listening);
+      const note = asking ? micProblem : '';
+      if (note !== shownNote) micNote.textContent = shownNote = note;
+    }
+
     function listen() {
       if (!micOk || rec || quiz.talking || phase !== 'ask') return;
       try {
         const r = rec = new Recognition();
-        r.lang = 'en-IN';
+        r.lang = recLang;
         r.interimResults = true;
         r.maxAlternatives = 5;
-        r.onstart = () => { if (rec === r) statusEl.classList.add('mic'); };
+        r.onstart = () => {
+          if (rec !== r) return;
+          listening = true;
+          micProblem = '';
+        };
         r.onresult = (e) => {
           if (rec !== r || phase !== 'ask') return;
+          micFails = 0;
+          clearTimeout(settleTimer);
           for (let i = e.resultIndex; i < e.results.length; i++) {
             const result = e.results[i];
             const heard = Array.from(result, (alt) => alt.transcript);
             if (heard.some(saysTarget)) return answer(quiz.digit);
+            if (!wordsIn(heard[0]).length) continue;
             // anything else said, once the recogniser has settled on it: another number is a wrong answer
-            if (result.isFinal && wordsIn(heard[0]).length) return answer(otherNumber(heard[0]));
+            if (result.isFinal) return answer(otherNumber(heard[0]));
+            // iPad Safari may never mark a result final: words that stop changing count as settled too
+            clearTimeout(settleTimer);
+            settleTimer = setTimeout(() => { if (rec === r) answer(otherNumber(heard[0])); }, 1400);
           }
         };
         r.onerror = (e) => {
-          // silence is fine; anything else (mic blocked, no network...) leaves tapping as the way to answer
-          if (e.error !== 'no-speech' && e.error !== 'aborted') micOk = false;
+          if (rec !== r || e.error === 'no-speech' || e.error === 'aborted') return; // silence is fine
+          console.warn('[mic]', e.error, e.message);
+          if (e.error === 'language-not-supported' && recLang !== 'en-US') { recLang = 'en-US'; return; }
+          micProblem = MIC_PROBLEMS[e.error] ?? `The microphone stopped (${e.error}). Tap 🎤 to try again.`;
+          // a blocked mic stays off until the 🎤 button is tapped; other trouble gets a few retries
+          if (/not-allowed|language/.test(e.error) || ++micFails >= 3) micOk = false;
         };
         r.onend = () => {
           if (rec !== r) return;
           rec = null;
-          statusEl.classList.remove('mic');
+          listening = false;
+          clearTimeout(startTimer);
           setTimeout(listen, 250); // keep listening until the number is named
         };
         r.start();
+        clearTimeout(startTimer);
+        startTimer = setTimeout(() => {
+          if (rec === r && !listening) micProblem = 'Waiting for the microphone… allow it if asked, or tap 🎤.';
+        }, 4000);
       } catch (e) {
         console.warn('[mic]', e);
         rec = null;
+        listening = false;
         micOk = false;
+        micProblem = 'Tap 🎤 to answer by voice.';
       }
     }
     function stopListening() {
       const r = rec;
       rec = null;
-      statusEl.classList.remove('mic');
+      listening = false;
+      clearTimeout(settleTimer);
+      clearTimeout(startTimer);
       try { r?.abort(); } catch (e) { /* already stopped */ }
     }
+    // Tapping the mic button (re)starts listening from inside a tap, which iPad Safari can insist on,
+    // and is the way to retry after the mic was blocked or failed.
+    micBtn.addEventListener('click', () => {
+      if (phase !== 'ask' || !Recognition || (rec && listening)) return;
+      sayId++; // drop whatever was waiting for the current sentence to finish
+      window.speechSynthesis?.cancel();
+      quiz.talking = false;
+      quiz.asked = phaseTime;
+      micOk = true;
+      micFails = 0;
+      micProblem = '';
+      stopListening();
+      listen();
+    });
 
     // speak a prompt with the mic off (so it can't hear itself), then listen for the answer
     function ask(text) {
@@ -2706,6 +2786,7 @@
         current.update(dt, phaseTime);
       }
 
+      syncMic();
       updateWorld(dt);
       updateCamera(dt);
       renderer.render(scene, camera);
