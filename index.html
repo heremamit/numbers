@@ -24,6 +24,9 @@
     }
     #picker button:hover, #mute:hover { background: #1e2a48; }
     #picker button.active { background: #ffd23f; border-color: #ffd23f; color: #0b0f1a; }
+    #picker button.hint { background: #35c46a; border-color: #35c46a; animation: hint 0.7s ease-in-out infinite alternate; }
+    @keyframes hint { to { transform: scale(1.3); } }
+    #status.mic::after { content: ' 🎤'; }
     #mute { position: fixed; top: 16px; right: 16px; z-index: 2; font-size: 20px; }
     #flash { position: fixed; inset: 0; background: #fff; opacity: 0; pointer-events: none; transition: opacity 0.6s ease-out; z-index: 3; }
     #flash.on { opacity: 0.9; transition: none; }
@@ -290,6 +293,7 @@
         noise({ f: 350, dur: 0.12, gain: 0.22 });
       },
       beep: () => tone({ type: 'square', f: 880, dur: 0.18, gain: 0.05 }),
+      oops: () => tone({ type: 'triangle', f: 330, f2: 210, dur: 0.32, gain: 0.14 }),
       shutter() { // phone camera "click-clack"
         noise({ filter: 'highpass', f: 2500, dur: 0.04, gain: 0.35 });
         noise({ filter: 'bandpass', f: 1800, q: 2, dur: 0.06, gain: 0.3, at: 0.09 });
@@ -1647,9 +1651,9 @@
     stage.add(particles);
 
     // ---------- game state ----------
-    const HOLD = 0.9, MORPH = 3.0, SETTLE = 0.7;
+    const HOLD = 1.4, MORPH = 3.0, SETTLE = 0.7;
     let current = null;   // active SHAPES entry
-    let phase = 'idle';   // idle | hold | morph | settle | done
+    let phase = 'idle';   // idle | ask | hold | morph | settle | done
     let phaseTime = 0;
     let now = 0;
     const statusEl = document.getElementById('status');
@@ -2268,10 +2272,12 @@
       material.uniforms.uProgress.value = 0;
       current.digit.group.visible = true;
       current.digit.group.scale.setScalar(0.6);
-      phase = 'hold';
+      phase = 'ask';
       phaseTime = 0;
       sfx.chime();
-      status(`Nice ${digit}! ✨`);
+      quiz = { digit, misses: 0, asked: 0, talking: false };
+      status('Which number is this? 🤔');
+      ask(`${KID_NAME}, which number is this?`);
     }
 
     // ---------- connect-the-dots: dots are laid along each digit's strokes, projected to the screen ----------
@@ -2357,7 +2363,7 @@
       return touched.sort((d1, d2) => near(d1, p) - near(d2, p));
     }
 
-    const busy = () => phase === 'hold' || phase === 'morph' || phase === 'settle';
+    const busy = () => phase === 'ask' || phase === 'hold' || phase === 'morph' || phase === 'settle';
 
     // ---------- spoken hint when a number is picked (browser text-to-speech) ----------
     const KID_NAME = 'Advik';
@@ -2380,17 +2386,135 @@
       pickVoice();
       window.speechSynthesis.addEventListener?.('voiceschanged', pickVoice);
     }
-    function say(text) {
-      if (audio.muted || !window.speechSynthesis) return;
+    let sayId = 0;
+    let utterance = null; // kept referenced, or Chrome may drop it before its end event fires
+    // `then` runs once the sentence has been spoken (straight away when muted); a newer say() cancels it
+    function say(text, then) {
+      const id = ++sayId;
+      let fired = false;
+      const done = () => {
+        if (fired || id !== sayId) return;
+        fired = true;
+        then?.();
+      };
+      if (audio.muted || !window.speechSynthesis) return done();
       try {
-        window.speechSynthesis.cancel(); // a new pick interrupts the last sentence
-        const u = new SpeechSynthesisUtterance(text);
+        window.speechSynthesis.cancel(); // a new sentence interrupts the last one
+        const u = utterance = new SpeechSynthesisUtterance(text);
         u.lang = 'en-IN';
         if (voice) u.voice = voice;
         u.rate = 0.92;
         u.pitch = 1.05;
+        u.onend = u.onerror = done;
         window.speechSynthesis.speak(u);
-      } catch (e) { console.warn('[speech]', e); }
+        if (then) setTimeout(done, 2000 + text.length * 120); // in case the browser never reports the end
+      } catch (e) {
+        console.warn('[speech]', e);
+        done();
+      }
+    }
+
+    // ---------- "which number is this?": the drawn number only transforms once it has been named ----------
+    // The answer can be spoken (speech recognition, where the browser has it) or tapped on the number bar.
+    const SPOKEN = { // first entry is the real word, the rest are what recognisers tend to hear instead
+      1: ['one', 'won', 'wan'], 2: ['two', 'to', 'too', 'tu'], 3: ['three', 'tree', 'free', 'thri'],
+      4: ['four', 'for', 'fore', 'foor'], 5: ['five', 'fife', 'hive'], 6: ['six', 'sex', 'sics', 'sick'],
+      7: ['seven', 'sevan', 'saven'], 8: ['eight', 'ate', 'ait', 'eat'], 9: ['nine', 'nain', 'nein', 'line'],
+    };
+    const wordsIn = (text) => text.toLowerCase().match(/[a-z]+|\d/g) ?? [];
+    const saysTarget = (text) => wordsIn(text).some((w) => w === String(quiz.digit) || SPOKEN[quiz.digit].includes(w));
+    // a clearly spoken different number (sound-alikes such as "to" / "for" don't count as a wrong answer)
+    const otherNumber = (text) => {
+      const words = wordsIn(text);
+      for (let n = 1; n <= 9; n++) {
+        if (n !== quiz.digit && (words.includes(String(n)) || words.includes(SPOKEN[n][0]))) return n;
+      }
+      return 0;
+    };
+
+    let quiz = { digit: 0, misses: 0, asked: 0, talking: false };
+    const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
+    let rec = null;
+    let micOk = !!Recognition;
+
+    function listen() {
+      if (!micOk || rec || quiz.talking || phase !== 'ask') return;
+      try {
+        const r = rec = new Recognition();
+        r.lang = 'en-IN';
+        r.interimResults = true;
+        r.maxAlternatives = 5;
+        r.onstart = () => { if (rec === r) statusEl.classList.add('mic'); };
+        r.onresult = (e) => {
+          if (rec !== r || phase !== 'ask') return;
+          for (let i = e.resultIndex; i < e.results.length; i++) {
+            const result = e.results[i];
+            const heard = Array.from(result, (alt) => alt.transcript);
+            if (heard.some(saysTarget)) return answer(quiz.digit);
+            const wrong = result.isFinal && otherNumber(heard[0]);
+            if (wrong) return answer(wrong);
+          }
+        };
+        r.onerror = (e) => {
+          // silence is fine; anything else (mic blocked, no network...) leaves tapping as the way to answer
+          if (e.error !== 'no-speech' && e.error !== 'aborted') micOk = false;
+        };
+        r.onend = () => {
+          if (rec !== r) return;
+          rec = null;
+          statusEl.classList.remove('mic');
+          setTimeout(listen, 250); // keep listening until the number is named
+        };
+        r.start();
+      } catch (e) {
+        console.warn('[mic]', e);
+        rec = null;
+        micOk = false;
+      }
+    }
+    function stopListening() {
+      const r = rec;
+      rec = null;
+      statusEl.classList.remove('mic');
+      try { r?.abort(); } catch (e) { /* already stopped */ }
+    }
+
+    // speak a prompt with the mic off (so it can't hear itself), then listen for the answer
+    function ask(text) {
+      stopListening();
+      quiz.asked = phaseTime;
+      quiz.talking = true;
+      say(text, () => {
+        quiz.talking = false;
+        listen();
+      });
+    }
+
+    const pickerButtons = [...document.querySelectorAll('#picker button')];
+    function answer(n) {
+      if (phase !== 'ask') return;
+      const { digit } = quiz;
+      if (n === digit) {
+        stopListening();
+        pickerButtons.forEach((b) => b.classList.remove('hint'));
+        phase = 'hold';
+        phaseTime = 0;
+        sfx.chime();
+        sfx.clap();
+        status(`Yes! It's ${digit}! 🎉`);
+        say(`Yes! This is ${digit}! Well done, ${KID_NAME}!`);
+        return;
+      }
+      sfx.oops();
+      if (++quiz.misses >= 2) {
+        // two misses: show and tell the answer, but it still has to be said or tapped
+        pickerButtons.forEach((b) => b.classList.toggle('hint', +b.dataset.digit === digit));
+        status(`This is ${digit}! Say ${digit}! 👇`);
+        ask(`This is ${digit}. Can you say ${digit}?`);
+      } else {
+        status(`Not ${n}. Try again! 🤔`);
+        ask(`Not ${n}. Try again! Which number is this?`);
+      }
     }
 
     function selectDigit(digit) {
@@ -2455,7 +2579,11 @@
     }
 
     document.querySelectorAll('#picker button').forEach((b) => {
-      b.addEventListener('click', () => selectDigit(+b.dataset.digit));
+      b.addEventListener('click', () => {
+        const digit = +b.dataset.digit;
+        if (phase === 'ask') answer(digit);
+        else selectDigit(digit);
+      });
     });
 
     window.addEventListener('resize', () => {
@@ -2497,9 +2625,14 @@
       now = material.uniforms.uTime.value += dt;
       phaseTime += dt;
 
-      if (phase === 'hold') {
-        // the finished number pops in as a solid, then breaks into particles
-        current.digit.group.scale.setScalar(lerp(0.6, 1, easeOutBack(Math.min(1, phaseTime / 0.35))));
+      if (phase === 'ask') {
+        // the finished number pops in as a solid and waits, breathing gently, until it is named
+        const pop = lerp(0.6, 1, easeOutBack(Math.min(1, phaseTime / 0.35)));
+        current.digit.group.scale.setScalar(pop * (1 + Math.sin(phaseTime * 3) * 0.03));
+        if (!quiz.talking && phaseTime - quiz.asked > 15) ask(`${KID_NAME}, which number is this?`);
+      } else if (phase === 'hold') {
+        // named correctly: a happy hop, then it breaks into particles
+        current.digit.group.scale.setScalar(1 + Math.sin(Math.PI * Math.min(1, phaseTime / 0.4)) * 0.12);
         if (phaseTime > HOLD) {
           current.digit.group.visible = false;
           particles.visible = true;
