@@ -2466,7 +2466,8 @@
       : "This browser can't listen. Tap the number instead.";
     const MIC_PROBLEMS = {
       'not-allowed': onIOS ? 'Tap 🎤 and allow the microphone. (Settings › Safari › Microphone)' : 'Tap 🎤 and allow the microphone.',
-      'service-not-allowed': onIOS ? 'Turn on Dictation in Settings › General › Keyboard, then tap 🎤.' : NO_LISTENING,
+      // on iPad/iPhone this is the system-wide "Speech Recognition" permission for the browser being off
+      'service-not-allowed': onIOS ? 'Speech Recognition is off for Safari. Open Settings › Privacy & Security › Speech Recognition, turn on Safari, then tap 🎤.' : NO_LISTENING,
       'audio-capture': "The microphone isn't working. Tap 🎤 to try again.",
       network: 'Listening needs the internet. Tap 🎤 to try again.',
     };
@@ -2477,11 +2478,18 @@
     let settleTimer = 0;
     let startTimer = 0;
     let shownNote = '';
+    let lastHeard = '';
     function syncMic() {
       const asking = phase === 'ask';
       micBtn.classList.toggle('show', asking && !!Recognition);
       micBtn.classList.toggle('on', asking && listening);
-      const note = asking ? micProblem : '';
+      // say what the mic is doing, so it is plain on any device whether it is hearing anything
+      let note = '';
+      if (asking && micProblem) note = micProblem;
+      else if (asking && Recognition && !quiz.talking) {
+        note = listening ? (lastHeard ? `I heard: “${lastHeard}”` : 'Listening… say the number!')
+          : rec ? 'Starting the microphone…' : 'Tap 🎤 and say the number';
+      }
       if (note !== shownNote) micNote.textContent = shownNote = note;
     }
 
@@ -2495,6 +2503,7 @@
         r.onstart = () => {
           if (rec !== r) return;
           listening = true;
+          lastHeard = '';
           micProblem = '';
         };
         r.onresult = (e) => {
@@ -2504,6 +2513,7 @@
           for (let i = e.resultIndex; i < e.results.length; i++) {
             const result = e.results[i];
             const heard = Array.from(result, (alt) => alt.transcript);
+            lastHeard = heard[0].trim().slice(-40);
             if (heard.some(saysTarget)) return answer(quiz.digit);
             if (!wordsIn(heard[0]).length) continue;
             // anything else said, once the recogniser has settled on it: another number is a wrong answer
